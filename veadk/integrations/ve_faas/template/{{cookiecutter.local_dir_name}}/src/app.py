@@ -38,6 +38,12 @@ from veadk.types import AgentRunConfig
 from veadk.utils.logger import get_logger
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from opentelemetry import context
+from veadk.auth.oidc_middleware import create_oidc_middleware
+from a2a.utils.constants import (
+    AGENT_CARD_WELL_KNOWN_PATH,
+    EXTENDED_AGENT_CARD_PATH,
+    PREV_AGENT_CARD_WELL_KNOWN_PATH,
+)
 
 logger = get_logger(__name__)
 
@@ -162,6 +168,46 @@ app = FastAPI(
     docs_url=None,
     redoc_url=None
 )
+
+# OIDC Configuration from environment variables
+OIDC_DISCOVERY_URL = os.getenv("OIDC_DISCOVERY_URL", "")
+OIDC_ALLOWED_CLIENTS = os.getenv("OIDC_ALLOWED_CLIENTS", "").split(",")
+OIDC_CLIENT_ID = os.getenv("OIDC_CLIENT_ID", "")
+OIDC_CLIENT_SECRET = os.getenv("OIDC_CLIENT_SECRET", "")
+OIDC_EXCLUDED_PATHS = os.getenv("OIDC_EXCLUDED_PATHS", "/health,/metrics").split(",")
+
+# Add OIDC middleware if configured
+if OIDC_DISCOVERY_URL:
+    logger.info(
+        f"Enabling OIDC authentication with discovery URL: {OIDC_DISCOVERY_URL}"
+    )
+    logger.info(f"Allowed clients: {OIDC_ALLOWED_CLIENTS}")
+    logger.info(f"Excluded paths: {OIDC_EXCLUDED_PATHS}")
+    logger.info(f"Using introspection endpoint for token validation")
+
+    oidc_middleware = create_oidc_middleware(
+        discovery_url=OIDC_DISCOVERY_URL,
+        allowed_clients=[
+            client.strip() for client in OIDC_ALLOWED_CLIENTS if client.strip()
+        ],
+        client_id=OIDC_CLIENT_ID if OIDC_CLIENT_ID else None,
+        client_secret=OIDC_CLIENT_SECRET if OIDC_CLIENT_SECRET else None,
+        excluded_paths=[
+            AGENT_CARD_WELL_KNOWN_PATH,
+            PREV_AGENT_CARD_WELL_KNOWN_PATH,
+            EXTENDED_AGENT_CARD_PATH,
+            *(path.strip() for path in OIDC_EXCLUDED_PATHS if path.strip()),
+        ],
+        cache_ttl=int(os.getenv("OIDC_CACHE_TTL", "300")),
+        timeout=int(os.getenv("OIDC_TIMEOUT", "30")),
+    )
+
+    app.middleware("http")(oidc_middleware)
+else:
+    logger.warning(
+        "OIDC authentication not configured - running without token validation"
+    )
+
 
 @app.middleware("http")
 async def otel_context_middleware(request, call_next):
