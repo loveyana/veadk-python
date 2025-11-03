@@ -15,7 +15,6 @@
 import os
 import functools
 from types import MethodType
-from typing import Union
 from typing import Optional, Union
 
 from google import genai
@@ -25,6 +24,7 @@ from google.adk.agents.invocation_context import LlmCallsLimitExceededError
 from google.adk.runners import Runner as ADKRunner
 from google.genai import types
 from google.genai.types import Blob
+from pydantic import Field
 
 from veadk.agent import Agent
 from veadk.agents.loop_agent import LoopAgent
@@ -32,8 +32,9 @@ from veadk.agents.parallel_agent import ParallelAgent
 from veadk.agents.sequential_agent import SequentialAgent
 from veadk.config import getenv
 from veadk.evaluation import EvalSetRecorder
-from veadk.integrations.ve_identity import _NoOpAuthProcessor, AuthRequestProcessor
+from veadk.integrations.ve_identity import AuthRequestProcessor
 from veadk.memory.short_term_memory import ShortTermMemory
+from veadk.processors.base_run_processor import BaseRunProcessor, NoOpRunProcessor
 from veadk.types import MediaMessage
 from veadk.utils.logger import get_logger
 from veadk.utils.misc import formatted_timestamp, read_png_to_bytes
@@ -169,7 +170,7 @@ class Runner(ADKRunner):
         app_name: str = "veadk_default_app",
         user_id: str = "veadk_default_user",
         upload_inline_data_to_tos: bool = False,
-        auth_request_processor: Optional[AuthRequestProcessor] = _NoOpAuthProcessor(),
+        run_processor: Optional[BaseRunProcessor] = Field(default=None, exclude=True),
         *args,
         **kwargs,
     ) -> None:
@@ -177,7 +178,10 @@ class Runner(ADKRunner):
         self.long_term_memory = None
         self.short_term_memory = short_term_memory
         self.upload_inline_data_to_tos = upload_inline_data_to_tos
-        self.auth_request_processor = auth_request_processor
+        # Initialize run_processor if not provided
+        if self.run_processor is None:
+            self.run_processor = NoOpRunProcessor()
+
         session_service = kwargs.pop("session_service", None)
         memory_service = kwargs.pop("memory_service", None)
 
@@ -263,10 +267,9 @@ class Runner(ADKRunner):
         final_output = ""
         for converted_message in converted_messages:
             try:
-                @self.auth_request_processor.with_auth_loop(
+                @self.run_processor.process_run(
                     runner=self,
                     message=converted_message,
-                    max_cycles=len(self.agent.tools) * 2 + 1,
                     task_updater=task_updater,
                 )
                 async def event_generator():
