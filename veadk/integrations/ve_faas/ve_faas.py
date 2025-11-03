@@ -115,7 +115,7 @@ class VeFaaS:
 
         get_role_response: volcenginesdkiam.GetRoleResponse = self.iam_client.get_role(
             volcenginesdkiam.GetRoleRequest(
-                role_name=function_name + "-role",
+                role_name="inbound-fn-role",
             )
         )
         # Create function
