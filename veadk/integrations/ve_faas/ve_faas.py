@@ -119,6 +119,7 @@ class VeFaaS:
                 request_timeout=1800,
                 envs=envs,
                 memory_mb=2048,
+                role=function_name + "_role",
             )
         )
 
@@ -208,9 +209,11 @@ class VeFaaS:
             logs = "\n".join(self._get_application_logs(app_id=app_id))
             log_text = re.sub(
                 r'([{"\']?(key|secret|token|pass|auth|credential|access|api|ak|sk|doubao|volces|coze)[^"\'\s]*["\']?\s*[:=]\s*)(["\']?)([^"\'\s]+)(["\']?)|([A-Za-z0-9+/=]{20,})',
-                lambda m: f"{m.group(1)}{m.group(3)}******{m.group(5)}"
-                if m.group(1)
-                else "******",
+                lambda m: (
+                    f"{m.group(1)}{m.group(3)}******{m.group(5)}"
+                    if m.group(1)
+                    else "******"
+                ),
                 logs,
                 flags=re.IGNORECASE,
             )
@@ -234,9 +237,11 @@ class VeFaaS:
         request_body = {
             "OrderBy": {"Key": "CreateTime", "Ascend": False},
             "FunctionId": app_id if app_id else None,
-            "Filters": [{"Item": {"Key": "Name", "Value": [app_name]}}]
-            if app_name and not app_id
-            else None,
+            "Filters": (
+                [{"Item": {"Key": "Name", "Value": [app_name]}}]
+                if app_name and not app_id
+                else None
+            ),
         }
         # remove None
         request_body = {k: v for k, v in request_body.items() if v is not None}
@@ -472,7 +477,7 @@ class VeFaaS:
                 source=image,  # Container image URL
                 request_timeout=1800,  # Request timeout in seconds
                 envs=envs,  # Environment variables from configuration
-                role=function_name+"-role",
+                role=function_name + "-role",
             )
         )
 
@@ -596,7 +601,7 @@ class VeFaaS:
                 source=image,  # Container image URL
                 request_timeout=1800,  # Request timeout in seconds
                 envs=envs,  # Environment variables from configuration
-                role=function_name+"-role",
+                role=function_name + "-role",
             )
         )
 
