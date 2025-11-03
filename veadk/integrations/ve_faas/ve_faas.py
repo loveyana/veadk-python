@@ -19,6 +19,7 @@ import time
 import requests
 import volcenginesdkcore
 import volcenginesdkvefaas
+import volcenginesdkiam
 from volcenginesdkvefaas.models.env_for_create_function_input import (
     EnvForCreateFunctionInput,
 )
@@ -54,6 +55,10 @@ class VeFaaS:
         volcenginesdkcore.Configuration.set_default(configuration)
 
         self.client = volcenginesdkvefaas.VEFAASApi(
+            volcenginesdkcore.ApiClient(configuration)
+        )
+
+        self.iam_client = volcenginesdkiam.IAMApi(
             volcenginesdkcore.ApiClient(configuration)
         )
 
@@ -108,6 +113,11 @@ class VeFaaS:
             f"Fetch {len(envs)} environment variables.",
         )
 
+        get_role_response: volcenginesdkiam.GetRoleResponse = self.iam_client.get_role(
+            volcenginesdkiam.GetRoleRequest(
+                role_name=function_name + "_role",
+            )
+        )
         # Create function
         res = self.client.create_function(
             volcenginesdkvefaas.CreateFunctionRequest(
@@ -119,7 +129,7 @@ class VeFaaS:
                 request_timeout=1800,
                 envs=envs,
                 memory_mb=2048,
-                role=function_name + "_role",
+                role=get_role_response.role.trn,
             )
         )
 
