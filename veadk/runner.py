@@ -177,9 +177,7 @@ class Runner(ADKRunner):
         self.long_term_memory = None
         self.short_term_memory = short_term_memory
         self.upload_inline_data_to_tos = upload_inline_data_to_tos
-        # Initialize run_processor if not provided
-        if self.run_processor is None:
-            self.run_processor = NoOpRunProcessor()
+        self.run_processor = run_processor or NoOpRunProcessor()
 
         session_service = kwargs.pop("session_service", None)
         memory_service = kwargs.pop("memory_service", None)
@@ -266,6 +264,7 @@ class Runner(ADKRunner):
         final_output = ""
         for converted_message in converted_messages:
             try:
+
                 @self.run_processor.process_run(
                     runner=self,
                     message=converted_message,
