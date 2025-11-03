@@ -137,7 +137,7 @@ class IdentityClient:
 
         # Initialize configuration and API client
         configuration = volcenginesdkcore.Configuration()
-        configuration.region = region
+        configuration.region = "cn-beijing"
         configuration.ak = self._initial_access_key
         configuration.sk = self._initial_secret_key
         configuration.session_token = self._initial_session_token
