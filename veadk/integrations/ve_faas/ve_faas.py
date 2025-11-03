@@ -472,6 +472,7 @@ class VeFaaS:
                 source=image,  # Container image URL
                 request_timeout=1800,  # Request timeout in seconds
                 envs=envs,  # Environment variables from configuration
+                role=function_name+"-role",
             )
         )
 
