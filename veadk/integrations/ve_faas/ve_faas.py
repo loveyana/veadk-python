@@ -585,7 +585,7 @@ class VeFaaS:
         )
 
         # Create function with container image source configuration
-        res = self.client.create_function(
+        res: volcenginesdkvefaas.CreateFunctionResponse = self.client.create_function(
             volcenginesdkvefaas.CreateFunctionRequest(
                 command="bash ./run.sh",  # Custom startup command
                 name=function_name,
@@ -596,6 +596,7 @@ class VeFaaS:
                 source=image,  # Container image URL
                 request_timeout=1800,  # Request timeout in seconds
                 envs=envs,  # Environment variables from configuration
+                role=function_name+"-role",
             )
         )
 
