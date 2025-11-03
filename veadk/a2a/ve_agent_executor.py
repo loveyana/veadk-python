@@ -93,7 +93,7 @@ class VeAgentExecutor(AgentExecutor):
         )
 
         # Temporarily override the agent's auth processor
-        self.runner.auth_request_processor = AuthRequestProcessor(config=auth_config)
+        self.runner.run_processor = AuthRequestProcessor(config=auth_config)
 
         # running with interactive auth support
         final_output = await self.runner.run(

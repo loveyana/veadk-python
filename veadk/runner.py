@@ -32,12 +32,11 @@ from veadk.agents.parallel_agent import ParallelAgent
 from veadk.agents.sequential_agent import SequentialAgent
 from veadk.config import getenv
 from veadk.evaluation import EvalSetRecorder
-from veadk.integrations.ve_identity import AuthRequestProcessor
 from veadk.memory.short_term_memory import ShortTermMemory
 from veadk.processors.base_run_processor import BaseRunProcessor, NoOpRunProcessor
 from veadk.types import MediaMessage
 from veadk.utils.logger import get_logger
-from veadk.utils.misc import formatted_timestamp, read_png_to_bytes
+from veadk.utils.misc import formatted_timestamp
 
 from a2a.server.tasks import TaskUpdater
 
