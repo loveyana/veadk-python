@@ -12,9 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+from typing import Dict
+
 from a2a.server.agent_execution.agent_executor import AgentExecutor
 from a2a.server.agent_execution.context import RequestContext
 from a2a.server.events.event_queue import EventQueue
+from a2a.server.tasks import TaskUpdater
+from a2a.types import TaskState, TaskStatusUpdateEvent
 from a2a.utils import new_agent_text_message
 from typing_extensions import override
 
@@ -22,6 +27,10 @@ from veadk import Agent
 from veadk.memory.short_term_memory import ShortTermMemory
 from veadk.runner import Runner
 from veadk.utils.logger import get_logger
+from veadk.integrations.ve_identity.auth_processor import (
+    AuthRequestProcessor,
+    AuthRequestConfig,
+)
 
 logger = get_logger(__name__)
 
@@ -33,6 +42,10 @@ class VeAgentExecutor(AgentExecutor):
         self.agent = agent
         self.short_term_memory = short_term_memory
 
+        # Auth callback support
+        self._awaiting_auth: Dict[str, asyncio.Future] = {}
+        self._pending_auth_context: Dict[str, tuple[RequestContext, EventQueue]] = {}
+
         self.runner = Runner(
             agent=self.agent,
             short_term_memory=self.short_term_memory,
@@ -43,17 +56,19 @@ class VeAgentExecutor(AgentExecutor):
     @override
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         # extract metadata
+        task_updater = TaskUpdater(event_queue, context.task_id, context.context_id)
+
         user_id = (
             context.metadata["user_id"]
             if "user_id" in context.metadata
-            else "unkonwn_user"
+            else "unknown_user"
         )
         self.runner.user_id = user_id
 
         session_id = (
             context.metadata["session_id"]
             if "session_id" in context.metadata
-            else "unkonwn_session"
+            else "unknown_session"
         )
 
         # process user input
@@ -63,16 +78,44 @@ class VeAgentExecutor(AgentExecutor):
             f"Request: user_id: {user_id}, session_id: {session_id}, user_input: {user_input}"
         )
 
-        # running
+        async def on_auth_url(auth_uri: str):
+            logger.info(f"Authorization required: {auth_uri}")
+            await task_updater.update_status(
+                TaskState.auth_required,
+                message=new_agent_text_message(
+                    f"Authorization is required to continue. Please visit the following URL to authorize:\n\n{auth_uri}\n\nAfter authorization, the system will automatically continue."
+                ),
+            )
+
+        # Configure auth processor for interactive authentication
+        auth_config = AuthRequestConfig(
+            on_auth_url=on_auth_url,
+        )
+
+        # Temporarily override the agent's auth processor
+        self.runner.auth_request_processor = AuthRequestProcessor(config=auth_config)
+
+        # running with interactive auth support
         final_output = await self.runner.run(
             messages=user_input,
             session_id=session_id,
+            task_updater=task_updater,
         )
 
         logger.debug(f"Final output: {final_output}")
-
-        await event_queue.enqueue_event(new_agent_text_message(final_output))
+        await task_updater.update_status(
+            TaskState.completed,
+            final=True,
+            message=new_agent_text_message(final_output),
+        )
 
     @override
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
-        return None
+        await event_queue.enqueue_event(
+            TaskStatusUpdateEvent(
+                status=TaskState(state=TaskState.canceled),
+                final=True,
+                context_id=context.context_id,
+                task_id=context.task_id,
+            )
+        )

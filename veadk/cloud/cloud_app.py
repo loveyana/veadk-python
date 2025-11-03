@@ -19,41 +19,456 @@ from uuid import uuid4
 
 import httpx
 from a2a.client import A2ACardResolver, A2AClient
-from a2a.types import AgentCard, Message, MessageSendParams, SendMessageRequest
+from a2a.types import (
+    AgentCard,
+    Message,
+    MessageSendParams,
+    SendMessageRequest,
+    SecurityScheme,
+    HTTPAuthSecurityScheme,
+)
+from a2a.client.middleware import ClientCallContext, ClientCallInterceptor
+from a2a.client.auth import (
+    AuthInterceptor,
+    CredentialService,
+    InMemoryContextCredentialStore,
+)
 
 from veadk.config import getenv
 from veadk.utils.logger import get_logger
-from veadk.integrations.ve_faas.ve_faas import VeFaaS
 
+def handle_auth(message: str, auth_url: str):
+    print(f"🔐 需要认证: {message}")
+    if auth_url:
+        print(f"🔗 请访问: {auth_url}")
+        
 logger = get_logger(__name__)
 
 
+"""
+A2A Client with Interactive Authentication Support
+
+This client extends the basic A2A client functionality to handle interactive authentication flows.
+When a server returns an 'auth-required' status, the client will:
+1. Notify the user about the authentication requirement
+2. Poll the task status until authentication is completed
+3. Return the final result once authentication is done
+"""
+
+import asyncio
+import logging
+from typing import Any, Callable, Dict, Optional
+from uuid import uuid4
+
+import httpx
+from a2a.client import A2AClient, ClientCallContext
+from a2a.types import (GetTaskRequest, GetTaskSuccessResponse,
+                       MessageSendParams, SendMessageRequest,
+                       SendMessageSuccessResponse, Task, TaskQueryParams,
+                       TaskState)
+
+logger = logging.getLogger(__name__)
+
+# Default polling configuration
+DEFAULT_AUTH_POLLING_DELAY_SECONDS = 10
+DEFAULT_AUTH_TIMEOUT_SECONDS = 300  # 5 minutes
+
+
+class AuthenticationRequiredError(Exception):
+    """Raised when authentication is required but no auth handler is provided."""
+    
+    def __init__(self, message: str, auth_url: Optional[str] = None, task_id: Optional[str] = None):
+        super().__init__(message)
+        self.auth_url = auth_url
+        self.task_id = task_id
+
+
+class AuthenticationTimeoutError(Exception):
+    """Raised when authentication polling times out."""
+    pass
+
+
+class InteractiveAuthClient:
+    """
+    A2A Client with support for interactive authentication flows.
+    
+    This client can handle auth-required responses by polling the task status
+    until authentication is completed by the user.
+    """
+    
+    def __init__(
+        self,
+        a2a_client: A2AClient,
+        httpx_client: Optional[httpx.AsyncClient] = None,
+        auth_polling_delay: float = DEFAULT_AUTH_POLLING_DELAY_SECONDS,
+        auth_timeout: float = DEFAULT_AUTH_TIMEOUT_SECONDS,
+        auth_handler: Optional[Callable[[str, Optional[str]], None]] = None,
+        use_agent_card: bool = False,
+    ):
+        """
+        Initialize the interactive auth client.
+        
+        Args:
+            a2a_client: The underlying A2A client
+            httpx_client: Optional httpx client for making requests
+            auth_polling_delay: Delay between polling attempts in seconds
+            auth_timeout: Maximum time to wait for authentication in seconds
+            auth_handler: Optional callback function to handle auth notifications
+                         Signature: (message: str, auth_url: Optional[str]) -> None
+            use_agent_card: Whether to use agent card for requests
+        """
+        self.a2a_client = a2a_client
+        self.httpx_client = httpx_client
+        self.auth_polling_delay = auth_polling_delay
+        self.auth_timeout = auth_timeout
+        self.auth_handler = auth_handler
+        self.use_agent_card = use_agent_card
+    
+    async def send_message_with_auth(
+        self,
+        message: str,
+        user_id: str,
+        session_id: str,
+        timeout: float = 60.0,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """
+        Send a message with automatic handling of interactive authentication.
+
+        This method wraps your original request logic and adds auth handling.
+
+        Args:
+            message: The message text to send
+            user_id: User identifier
+            session_id: Session identifier
+            timeout: HTTP request timeout
+            context: Additional context for the request
+
+        Returns:
+            The final response from the server after any required authentication
+
+        Raises:
+            AuthenticationRequiredError: If auth is required but no handler is provided
+            AuthenticationTimeoutError: If authentication polling times out
+        """
+
+        # Save session_id for use in polling
+        self._session_id = session_id
+        
+        async def request():
+            send_message_payload: Dict[str, Any] = {
+                "message": {
+                    "role": "user",
+                    "parts": [{"type": "text", "text": message}],
+                    "messageId": uuid4().hex,
+                },
+                "metadata": {
+                    "user_id": user_id,
+                    "session_id": session_id,
+                },
+            }
+            
+            try:
+                message_send_request = SendMessageRequest(
+                    id=uuid4().hex,
+                    params=MessageSendParams(**send_message_payload),
+                )
+
+                # Use the provided context or create default context
+                call_context = context or ClientCallContext(
+                    state={
+                        'http_kwargs': {"timeout": httpx.Timeout(timeout)},
+                        'sessionId': session_id
+                    }
+                )
+
+                res = await self.a2a_client.send_message(
+                    message_send_request,
+                    context=call_context
+                )
+
+                logger.debug(f"Message sent with response: {res}")
+                
+                # Check if the response indicates a task that might require auth
+                if isinstance(res.root, SendMessageSuccessResponse):
+                    result = res.root.result
+                    
+                    # If result is a Task, check for auth requirements
+                    if isinstance(result, Task):
+                        return await self._handle_task_response(result)
+                    else:
+                        # Direct response, return as-is
+                        return result
+                else:
+                    # Handle other response types
+                    return res.root.result if hasattr(res.root, 'result') else res.root
+                    
+            except Exception as e:
+                logger.error(f"Request failed: {e}")
+                return None
+
+        return await request()
+    
+    async def _handle_task_response(self, task: Task) -> Any:
+        """
+        Handle a task response, including auth-required states.
+
+        Args:
+            task: The task returned from the server
+
+        Returns:
+            The final result after any required authentication
+        """
+        if task is None:
+            logger.error("Received None task from server")
+            return None
+
+        if not hasattr(task, 'status') or task.status is None:
+            logger.error("Task has no status")
+            return task
+
+        if not hasattr(task.status, 'state') or task.status.state is None:
+            logger.error("Task status has no state")
+            return task
+
+        # Check if authentication is required
+        if task.status.state == TaskState.auth_required:
+            return await self._handle_auth_required(task)
+
+        # Check if task is already completed
+        elif task.status.state == TaskState.completed:
+            return self._extract_task_result(task)
+
+        # For other states (working, etc.), we could poll for completion
+        # For now, return the current task
+        else:
+            task_id = getattr(task, 'id', 'unknown')
+            logger.info(f"Task {task_id} is in state: {task.status.state}")
+            return self._extract_task_result(task)
+    
+    async def _handle_auth_required(self, task: Task) -> Any:
+        """
+        Handle authentication required scenario.
+
+        Args:
+            task: The task requiring authentication
+
+        Returns:
+            The final result after authentication is completed
+        """
+        if task is None:
+            raise Exception("Cannot handle auth for None task")
+
+        auth_message = ""
+        auth_url = None
+
+        # Extract authentication details from the task status message
+        try:
+            if (hasattr(task, 'status') and task.status is not None and
+                hasattr(task.status, 'message') and task.status.message is not None and
+                hasattr(task.status.message, 'parts') and task.status.message.parts):
+
+                for part in task.status.message.parts:
+                    if hasattr(part, 'root') and hasattr(part.root, 'text'):
+                        auth_message = part.root.text
+                        # Try to extract URL from the message
+                        if 'http' in auth_message:
+                            # Simple URL extraction - you might want to use regex for better parsing
+                            words = auth_message.split()
+                            for word in words:
+                                if word.startswith('http'):
+                                    auth_url = word.rstrip('.,!?')
+                                    break
+                        break
+        except Exception as e:
+            logger.warning(f"Failed to extract auth message from task: {e}")
+            auth_message = "Authentication required (message extraction failed)"
+
+        # Notify about authentication requirement
+        if self.auth_handler:
+            self.auth_handler(auth_message, auth_url)
+        else:
+            # If no handler provided, raise an exception with details
+            task_id = getattr(task, 'id', 'unknown') if task else 'unknown'
+            raise AuthenticationRequiredError(
+                f"Authentication required: {auth_message}",
+                auth_url=auth_url,
+                task_id=task_id
+            )
+
+        # Poll for authentication completion
+        return await self._wait_for_auth_completion(task)
+    
+    async def _wait_for_auth_completion(self, task: Task) -> Any:
+        """
+        Poll the task status until authentication is completed.
+
+        Args:
+            task: The task requiring authentication
+
+        Returns:
+            The final result after authentication is completed
+        """
+        if task is None or not hasattr(task, 'id'):
+            raise Exception("Invalid task provided for authentication polling")
+
+        start_time = asyncio.get_event_loop().time()
+        current_task = task
+
+        while True:
+            # Check timeout
+            if asyncio.get_event_loop().time() - start_time > self.auth_timeout:
+                raise AuthenticationTimeoutError(
+                    f"Authentication timeout after {self.auth_timeout} seconds for task {task.id}"
+                )
+
+            # Check if task is now completed
+            if self._is_task_complete(current_task):
+                logger.info(f"Authentication completed for task {task.id}")
+                return self._extract_task_result(current_task)
+
+            # Wait before next poll
+            await asyncio.sleep(self.auth_polling_delay)
+
+            # Poll for updated task status
+            try:
+                current_task = await self._get_task_status(task.id)
+                if current_task is None:
+                    logger.warning(f"Received None task for ID {task.id}, continuing to poll...")
+                    continue
+            except Exception as e:
+                logger.error(f"Failed to poll task status: {e}")
+                # Continue polling - temporary network issues shouldn't stop the process
+                continue
+    
+    async def _get_task_status(self, task_id: str) -> Task:
+        """
+        Get the current status of a task.
+
+        Args:
+            task_id: The ID of the task to check
+
+        Returns:
+            The updated task object
+        """
+        request = GetTaskRequest(
+            id=uuid4().hex,
+            params=TaskQueryParams(id=task_id),
+        )
+
+        # Create a proper context for the get_task call to avoid auth interceptor issues
+        context = ClientCallContext(
+            state={
+                'sessionId': getattr(self, '_session_id', None),
+                'http_kwargs': {"timeout": httpx.Timeout(30.0)},
+            }
+        )
+
+        response = await self.a2a_client.get_task(request, context=context)
+
+        if isinstance(response.root, GetTaskSuccessResponse):
+            task = response.root.result
+            if task is None:
+                raise Exception(f"Task {task_id} not found or returned None")
+            return task
+        else:
+            raise Exception(f"Failed to get task status: {response}")
+    
+    def _is_task_complete(self, task: Task) -> bool:
+        """Check if a task is in a terminal state."""
+        if task is None:
+            logger.warning("Task is None, treating as incomplete")
+            return False
+
+        if not hasattr(task, 'status') or task.status is None:
+            logger.warning("Task has no status, treating as incomplete")
+            return False
+
+        if not hasattr(task.status, 'state') or task.status.state is None:
+            logger.warning("Task status has no state, treating as incomplete")
+            return False
+
+        terminal_states = {
+            TaskState.completed,
+            TaskState.failed,
+            TaskState.canceled,
+            TaskState.rejected,
+        }
+
+        return task.status.state in terminal_states
+    
+    def _extract_task_result(self, task: Task) -> Any:
+        """
+        Extract the result from a completed task.
+
+        Args:
+            task: The completed task
+
+        Returns:
+            The task result (artifacts or status message)
+        """
+        if task is None:
+            logger.warning("Cannot extract result from None task")
+            return None
+
+        # If task has artifacts, return them
+        if hasattr(task, 'artifacts') and task.artifacts:
+            return task.artifacts
+
+        # Otherwise return the status message
+        if (hasattr(task, 'status') and task.status is not None and
+            hasattr(task.status, 'message') and task.status.message is not None):
+            return task.status.message
+
+        # Fallback to the task itself
+        return task
+
+
+# Convenience function for simple usage
+async def send_message_with_auth(
+    a2a_client: A2AClient,
+    message: str,
+    user_id: str,
+    session_id: str,
+    timeout: float = 60.0,
+    auth_handler: Optional[Callable[[str, Optional[str]], None]] = None,
+    **kwargs
+) -> Any:
+    """
+    Convenience function to send a message with auth handling.
+    
+    Args:
+        a2a_client: The A2A client to use
+        message: Message text to send
+        user_id: User identifier
+        session_id: Session identifier
+        timeout: Request timeout
+        auth_handler: Optional auth notification handler
+        **kwargs: Additional arguments for InteractiveAuthClient
+        
+    Returns:
+        The final response after any required authentication
+    """
+    client = InteractiveAuthClient(
+        a2a_client=a2a_client,
+        auth_handler=auth_handler,
+        **kwargs
+    )
+    
+    return await client.send_message_with_auth(
+        message=message,
+        user_id=user_id,
+        session_id=session_id,
+        timeout=timeout,
+    )
+
 class CloudApp:
-    """Represents a deployed cloud agent application on Volcengine FaaS platform.
+    """CloudApp class.
 
-    This class facilitates interaction with the deployed agent via A2A protocol,
-    supports self-management like update and delete, and handles endpoint resolution.
-
-    It uses HTTP client for async communications.
-
-    Attributes:
-        vefaas_application_name (str): Name of the VeFaaS application. Defaults to "".
-        vefaas_endpoint (str): URL for accessing the application. Resolved if not provided.
-        vefaas_application_id (str): Unique identifier of the application. Defaults to "".
-        use_agent_card (bool): Flag to resolve endpoint via agent card. Defaults to False.
-        httpx_client (httpx.AsyncClient): Async HTTP client for requests.
-
-    Note:
-        At least one of name, endpoint, or ID must be provided during init.
-        Agent card mode fetches card from the endpoint's public path.
-
-    Examples:
-        ```python
-        from veadk.cloud.cloud_app import CloudApp
-        app = CloudApp(vefaas_endpoint="https://my-agent.volcengine.com")
-        response = await app.message_send("Query", "session-1", "user-123")
-        print(response.message_id)
-        ```
+    Args:
+        name (str): The name of the cloud app.
+        endpoint (str): The endpoint of the cloud app.
+        use_agent_card (bool): Whether to use agent card to invoke agent. If True, the client will post to the url in agent card. Otherwise, the client will post to the endpoint directly. Default False (cause the agent card and agent usually use the same endpoint).
     """
 
     def __init__(
@@ -62,36 +477,13 @@ class CloudApp:
         vefaas_endpoint: str = "",
         vefaas_application_id: str = "",
         use_agent_card: bool = False,
+        credential_service: InMemoryContextCredentialStore = InMemoryContextCredentialStore(),
     ):
-        """Initializes the CloudApp with VeFaaS application details.
-
-        Sets attributes, validates inputs, resolves endpoint if missing, and creates HTTP client.
-
-        Args:
-            vefaas_application_name (str, optional): Application name for lookup. Defaults to "".
-            vefaas_endpoint (str, optional): Direct endpoint URL. Defaults to "".
-            vefaas_application_id (str, optional): Application ID for lookup. Defaults to "".
-            use_agent_card (bool): Use agent card to determine invocation URL. Defaults to False.
-
-        Returns:
-            None
-
-        Raises:
-            ValueError: If no app identifiers provided or endpoint lacks http/https prefix.
-
-        Note:
-            Logs info if agent card mode enabled.
-            Endpoint is fetched via _get_vefaas_endpoint if not set.
-
-        Examples:
-            ```python
-            app = CloudApp(vefaas_application_id="app-123", use_agent_card=True)
-            ```
-        """
         self.vefaas_endpoint = vefaas_endpoint
         self.vefaas_application_id = vefaas_application_id
         self.vefaas_application_name = vefaas_application_name
         self.use_agent_card = use_agent_card
+        self.credential_service = credential_service
 
         # vefaas must be set one of three
         if (
@@ -127,29 +519,6 @@ class CloudApp:
         volcengine_ak: str = getenv("VOLCENGINE_ACCESS_KEY"),
         volcengine_sk: str = getenv("VOLCENGINE_SECRET_KEY"),
     ) -> str:
-        """Fetches the application endpoint from VeFaaS details if not directly provided.
-
-        Uses VeFaaS client to get app info and parse CloudResource JSON for URL.
-
-        Args:
-            volcengine_ak (str, optional): Volcengine access key. Defaults to env var.
-            volcengine_sk (str, optional): Volcengine secret key. Defaults to env var.
-
-        Returns:
-            str: The system URL from CloudResource or empty string on failure.
-
-        Raises:
-            ValueError: If application not found by ID or name.
-
-        Note:
-            Logs warning if JSON parsing fails; returns empty on error.
-            Called during init if endpoint missing.
-
-        Examples:
-            ```python
-            endpoint = app._get_vefaas_endpoint("custom-ak", "custom-sk")
-            ```
-        """
         from veadk.integrations.ve_faas.ve_faas import VeFaaS
 
         vefaas_client = VeFaaS(access_key=volcengine_ak, secret_key=volcengine_sk)
@@ -173,26 +542,6 @@ class CloudApp:
         return vefaas_endpoint
 
     def _get_vefaas_application_id_by_name(self) -> str:
-        """Retrieves the application ID using the configured name.
-
-        Instantiates VeFaaS client and queries by name.
-
-        Returns:
-            str: The found application ID.
-
-        Raises:
-            ValueError: If vefaas_application_name is not set.
-
-        Note:
-            Uses default environment credentials.
-            Internal method for ID resolution.
-
-        Examples:
-            ```python
-            app.vefaas_application_name = "my-app"
-            id = app._get_vefaas_application_id_by_name()
-            ```
-        """
         if not self.vefaas_application_name:
             raise ValueError(
                 "VeFaaS CloudAPP must be set application_name to get application_id."
@@ -209,115 +558,61 @@ class CloudApp:
         return vefaas_application_id
 
     async def _get_a2a_client(self) -> A2AClient:
-        """Constructs an A2A client configured for this cloud app.
+        interceptors: list[ClientCallInterceptor] = [
+            AuthInterceptor(self.credential_service)
+        ]
 
-        If use_agent_card, resolves agent card and uses its URL; otherwise uses direct endpoint.
-
-        Args:
-            self: The CloudApp instance.
-
-        Returns:
-            A2AClient: Ready-to-use A2A client.
-
-        Note:
-            Manages httpx_client context.
-            For card mode, fetches from base_url/ (public card).
-        """
         if self.use_agent_card:
-            async with self.httpx_client as httpx_client:
-                resolver = A2ACardResolver(
-                    httpx_client=httpx_client, base_url=self.vefaas_endpoint
-                )
+            http_auth_scheme_data = {
+                "type": "http",
+                "bearer_format": "jwt",
+                "scheme": "Bearer",
+            }
+            http_auth_scheme = HTTPAuthSecurityScheme.model_validate(
+                http_auth_scheme_data
+            )
+            resolver = A2ACardResolver(
+                httpx_client=self.httpx_client,
+                base_url=self.vefaas_endpoint,  # 这里的base_url是用来获取agent_card的...
+            )
 
-                final_agent_card_to_use: AgentCard | None = None
-                _public_card = (
-                    await resolver.get_agent_card()
-                )  # Fetches from default public path
-                final_agent_card_to_use = _public_card
-
-                return A2AClient(
-                    httpx_client=self.httpx_client, agent_card=final_agent_card_to_use
-                )
+            final_agent_card_to_use: AgentCard | None = None
+            _public_card = (
+                await resolver.get_agent_card()
+            )  # Fetches from default public path
+            final_agent_card_to_use = _public_card
+            final_agent_card_to_use.security = [{"http_auth": []}]
+            final_agent_card_to_use.security_schemes = {
+                "http_auth": SecurityScheme(root=http_auth_scheme)
+            }
+            final_agent_card_to_use.url = self.vefaas_endpoint
+            return A2AClient(
+                httpx_client=self.httpx_client,
+                agent_card=final_agent_card_to_use,
+                interceptors=interceptors,
+            )
         else:
-            return A2AClient(httpx_client=self.httpx_client, url=self.vefaas_endpoint)
+            return A2AClient(
+                httpx_client=self.httpx_client,
+                url=self.vefaas_endpoint,
+                interceptors=interceptors,
+            )
 
     def update_self(
         self,
-        path: str,
         volcengine_ak: str = getenv("VOLCENGINE_ACCESS_KEY"),
         volcengine_sk: str = getenv("VOLCENGINE_SECRET_KEY"),
     ):
-        """Updates the configuration of this cloud application.
-
-        Currently a placeholder; implementation pending.
-
-        Args:
-            volcengine_ak (str, optional): Access key for VeFaaS. Defaults to env var.
-            volcengine_sk (str, optional): Secret key for VeFaaS. Defaults to env var.
-
-        Returns:
-            None
-
-        Raises:
-            ValueError: If access key or secret key missing.
-
-        Examples:
-            ```python
-            app.update_self("ak", "sk")
-            ```
-        """
         if not volcengine_ak or not volcengine_sk:
             raise ValueError("Volcengine access key and secret key must be set.")
 
-        if not self.vefaas_application_id:
-            self.vefaas_application_id = self._get_vefaas_application_id_by_name()
-
-        vefaas_client = VeFaaS(access_key=volcengine_ak, secret_key=volcengine_sk)
-
-        try:
-            vefaas_application_url, app_id, function_id = (
-                vefaas_client._update_function_code(
-                    application_name=self.vefaas_application_name,
-                    path=path,
-                )
-            )
-            self.vefaas_endpoint = vefaas_application_url
-            self.vefaas_application_id = app_id
-            logger.info(
-                f"Cloud app {self.vefaas_application_name} updated successfully."
-            )
-        except Exception as e:
-            raise ValueError(f"Failed to update cloud app. Error: {e}")
+        # TODO(floritange): support update cloud app
 
     def delete_self(
         self,
         volcengine_ak: str = getenv("VOLCENGINE_ACCESS_KEY"),
         volcengine_sk: str = getenv("VOLCENGINE_SECRET_KEY"),
     ):
-        """Deletes this cloud application after interactive confirmation.
-
-        Issues delete to VeFaaS and polls for completion.
-
-        Args:
-            volcengine_ak (str, optional): Access key. Defaults to env var.
-            volcengine_sk (str, optional): Secret key. Defaults to env var.
-
-        Returns:
-            None
-
-        Raises:
-            ValueError: If credentials not provided.
-
-        Note:
-            Fetches ID if not set using name.
-            Polls every 3 seconds until app no longer exists.
-            Prints status messages.
-
-        Examples:
-            ```python
-            app.delete_self()
-            ```
-        """
         if not volcengine_ak or not volcengine_sk:
             raise ValueError("Volcengine access key and secret key must be set.")
 
@@ -349,94 +644,84 @@ class CloudApp:
             print("Delete application done.")
 
     async def message_send(
-        self, message: str, session_id: str, user_id: str, timeout: float = 600.0
+        self,
+        message: str,
+        session_id: str,
+        user_id: str,
+        timeout: float = 600.0,
+        bearer_token: str | None = None,
     ) -> Message | None:
-        """Sends a user message to the cloud agent and retrieves the response.
-
-        Constructs A2A SendMessageRequest and executes via client.
-
-        Args:
-            message (str): Text content of the user message.
-            session_id (str): Identifier for the conversation session.
-            user_id (str): Identifier for the user.
-            timeout (float): Maximum wait time in seconds. Defaults to 600.0.
-
-        Returns:
-            Message | None: Assistant response message or None if error occurs.
-
-        Raises:
-            Exception: Communication or processing errors; error is printed.
-
-        Note:
-            Uses UUID for message and request IDs.
-            Payload includes role 'user' and text part.
-            Debug logs the full response.
-            Ignores type checks for result as it may not be Task.
-
-        Examples:
-            ```python
-            response = await app.message_send("What is AI?", "chat-1", "user-1", timeout=300)
-            print(response.content)
-            ```
         """
+        timeout is in seconds, default 600s (10 minutes)
+
+        params:
+            bearer_token: the token to authenticate the user.
+        """
+        await self.credential_service.set_credentials(
+            session_id=session_id,
+            security_scheme_name="http_auth",
+            credential=bearer_token,
+        )
+
         a2a_client = await self._get_a2a_client()
+        auth_client = InteractiveAuthClient(
+            a2a_client=a2a_client,
+            httpx_client=self.httpx_client,
+            auth_handler=handle_auth,
+            use_agent_card=self.use_agent_card,  # 保持你的原始设置
+        )
 
-        async with self.httpx_client:
-            send_message_payload: dict[str, Any] = {
-                "message": {
-                    "role": "user",
-                    "parts": [{"type": "text", "text": message}],
-                    "messageId": uuid4().hex,
-                },
-                "metadata": {
-                    "user_id": user_id,
-                    "session_id": session_id,
-                },
-            }
-            try:
-                message_send_request = SendMessageRequest(
-                    id=uuid4().hex,
-                    params=MessageSendParams(**send_message_payload),
-                )
+        # 替换原始的 request() 调用
+        return await auth_client.send_message_with_auth(
+            message=message,
+            user_id=user_id,
+            session_id=session_id,
+            timeout=timeout,
+        )
 
-                res = await a2a_client.send_message(
-                    message_send_request,
-                    http_kwargs={"timeout": httpx.Timeout(timeout)},
-                )
+        # async def request():
+        #     send_message_payload: dict[str, Any] = {
+        #         "message": {
+        #             "role": "user",
+        #             "parts": [{"type": "text", "text": message}],
+        #             "messageId": uuid4().hex,
+        #         },
+        #         "metadata": {
+        #             "user_id": user_id,
+        #             "session_id": session_id,
+        #         },
+        #     }
+        #     try:
+        #         message_send_request = SendMessageRequest(
+        #             id=uuid4().hex,
+        #             params=MessageSendParams(**send_message_payload),
+        #         )
 
-                logger.debug(
-                    f"Message sent to cloud app {self.vefaas_application_name} with response: {res}"
-                )
+        #         res = await a2a_client.send_message(
+        #             message_send_request,
+        #             context=ClientCallContext(state={'http_kwargs': {"timeout": httpx.Timeout(timeout)},'sessionId': session_id})
+        #         )
 
-                # we ignore type checking here, because the response
-                # from CloudApp will not be `Task` type
-                return res.root.result  # type: ignore
-            except Exception as e:
-                logger.error(f"Failed to send message to cloud app. Error: {e}")
-                return None
+        #         logger.debug(
+        #             f"Message sent to cloud app {self.vefaas_application_name} with response: {res}"
+        #         )
+
+        #         # we ignore type checking here, because the response
+        #         # from CloudApp will not be `Task` type
+        #         return res.root.result  # type: ignore
+        #     except Exception as e:
+        #         # TODO(floritange): show error log on VeFaaS function
+        #         print(e)
+        #         return None
+
+        # if not self.use_agent_card:
+        #     async with self.httpx_client:
+        #         return await request()
+        # return await request()
 
 
 def get_message_id(message: Message):
-    """Extracts the unique ID from an A2A Message object.
-
-    Checks for both legacy 'messageId' and current 'message_id' attributes.
-
-    Args:
-        message (Message): The A2A message instance.
-
-    Returns:
-        str: The message identifier.
-
-    Note:
-        Ensures compatibility with a2a-python versions before and after 0.3.0.
-        Prefers 'message_id' if available, falls back to 'messageId'.
-
-    Examples:
-        ```python
-        mid = get_message_id(response_message)
-        print(mid)
-        ```
-    """
+    """Get the messageId of the a2a message"""
     if getattr(message, "messageId", None):
         # Compatible with the messageId of the old a2a-python version (<0.3.0) in cloud app
         return message.messageId  # type: ignore
