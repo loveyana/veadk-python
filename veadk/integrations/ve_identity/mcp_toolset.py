@@ -302,7 +302,7 @@ class VeIdentityMcpToolset(VeIdentityAuthMixin, BaseToolset):
             request_euc_function_call = types.FunctionCall(
                 name=REQUEST_EUC_FUNCTION_CALL_NAME,
                 args=AuthToolArguments(
-                    function_call_id=tool_context.function_call_id,
+                    function_call_id=tool_context.function_call_id or generate_client_function_call_id(),
                     auth_config=e.auth_config,
                 ).model_dump(exclude_none=True, by_alias=True),
             )
