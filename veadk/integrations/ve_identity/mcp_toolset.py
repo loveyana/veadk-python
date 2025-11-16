@@ -181,6 +181,8 @@ class VeIdentityMcpToolset(VeIdentityAuthMixin, BaseToolset):
 
         # Cache for headers generated from credential to avoid repeated authentication
         self._headers: Optional[Dict[str, str]] = None
+        # Cache for tools to use in graph
+        self._tools: Optional[List[BaseTool]] = None
 
     @retry_on_closed_resource
     @override
