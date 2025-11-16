@@ -753,3 +753,49 @@ class IdentityClient:
             f"Permission check result for principal {principal['Id']} on resource {resource['Id']}: {response.allowed}"
         )
         return response.allowed
+
+    @refresh_credentials
+    def create_policy(
+        self,
+        principal: Dict[str, str],
+        operation: Dict[str, str],
+        resource: Dict[str, str],
+        namespace: str = "default",
+    ) -> volcenginesdkid.CreatePolicyResponse:
+        """Create a policy that permits the principal to perform the operation on the resource.
+
+        Args:
+            principal: Principal information, e.g., {"Type": "User", "Id": "user123"}
+            operation: Operation to check, e.g., {"Type": "Action", "Id": "invoke"}
+            resource: Resource information, e.g., {"Type": "Agent", "Id": "agent456"}
+            namespace: Namespace of the resource. Defaults to "default".
+
+        Returns:
+            CreatePolicyResponse containing the created policy information.
+
+        Raises:
+            ValueError: If input parameters are invalid
+            RuntimeError: If the policy creation API call fails
+        """
+        logger.info(
+            f"Creating policy for principal {principal['Id']} on resource {resource['Id']} for operation {operation['Id']}..."
+        )
+
+        # Generate Cedar policy statement
+        # Format: permit(principal: Type::"Id", action: Type::"Id", resource: Type::"Id");
+        cedar_policy = (
+            f"permit(\n"
+            f'  principal == {principal["Type"]}::"{principal["Id"]}",\n'
+            f'  action == {operation["Type"]}::"{operation["Id"]}",\n'
+            f'  resource == {resource["Type"]}::"{resource["Id"]}"\n'
+            f");"
+        )
+
+        logger.debug(f"Generated Cedar policy:\n{cedar_policy}")
+
+        return self._api_client.create_policy(
+            volcenginesdkid.CreatePolicyRequest(
+                namespace_name=namespace,
+                policy=cedar_policy,
+            )
+        )
