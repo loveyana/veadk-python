@@ -297,17 +297,18 @@ class VeIdentityMcpToolset(VeIdentityAuthMixin, BaseToolset):
                 raise
             # Generate auth event similar to the reference implementation
             parts = []
-            long_running_tool_ids = set()
+            # long_running_tool_ids = set()
 
+            function_id = generate_client_function_call_id()
             request_euc_function_call = types.FunctionCall(
+                id=function_id,
                 name=REQUEST_EUC_FUNCTION_CALL_NAME,
                 args=AuthToolArguments(
-                    function_call_id=tool_context.function_call_id or generate_client_function_call_id(),
+                    function_call_id=tool_context.function_call_id or function_id,
                     auth_config=e.auth_config,
                 ).model_dump(exclude_none=True, by_alias=True),
             )
-            request_euc_function_call.id = generate_client_function_call_id()
-            long_running_tool_ids.add(request_euc_function_call.id)
+            # long_running_tool_ids.add(request_euc_function_call.id)
             parts.append(types.Part(function_call=request_euc_function_call))
 
             yield Event(
@@ -315,7 +316,7 @@ class VeIdentityMcpToolset(VeIdentityAuthMixin, BaseToolset):
                 author=tool_context._invocation_context.agent.name,
                 branch=tool_context._invocation_context.branch,
                 content=types.Content(parts=parts, role=tool_context.user_content.role),
-                long_running_tool_ids=long_running_tool_ids,
+                # long_running_tool_ids=long_running_tool_ids,
             )
 
     async def close(self) -> None:
