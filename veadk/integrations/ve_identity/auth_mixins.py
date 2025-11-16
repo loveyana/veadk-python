@@ -454,7 +454,7 @@ class OAuth2AuthMixin(BaseAuthMixin):
             auth_uri = urllib.parse.unquote(response.authorization_url)
             if isinstance(tool_context, ToolContext):
                 # Prepare auth_config with credential
-                auth_config.raw_auth_credential = AuthCredential(
+                auth_config.exchanged_auth_credential = AuthCredential(
                     auth_type=AuthCredentialTypes.OAUTH2,
                     oauth2=OAuth2Auth(auth_uri=auth_uri),
                     resource_ref=response.resource_ref,
