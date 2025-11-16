@@ -311,7 +311,7 @@ class VeIdentityMcpToolset(VeIdentityAuthMixin, BaseToolset):
             long_running_tool_ids.add(request_euc_function_call.id)
             parts.append(types.Part(function_call=request_euc_function_call))
 
-            return Event(
+            yield Event(
                 invocation_id=tool_context._invocation_context.invocation_id,
                 author=tool_context._invocation_context.agent.name,
                 branch=tool_context._invocation_context.branch,
