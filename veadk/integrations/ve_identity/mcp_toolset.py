@@ -44,9 +44,18 @@ from google.adk.events.event import Event
 from google.adk.auth.auth_tool import AuthToolArguments
 from google.adk.models.llm_request import LlmRequest
 from google.adk.tools.tool_context import ToolContext
-from google.adk.flows.llm_flows.functions import generate_client_function_call_id,REQUEST_EUC_FUNCTION_CALL_NAME
-from veadk.integrations.ve_identity.auth_config import VeIdentityAuthConfig, OAuth2AuthConfig
-from veadk.integrations.ve_identity.auth_mixins import VeIdentityAuthMixin, AuthRequiredException
+from google.adk.flows.llm_flows.functions import (
+    generate_client_function_call_id,
+    REQUEST_EUC_FUNCTION_CALL_NAME,
+)
+from veadk.integrations.ve_identity.auth_config import (
+    VeIdentityAuthConfig,
+    OAuth2AuthConfig,
+)
+from veadk.integrations.ve_identity.auth_mixins import (
+    VeIdentityAuthMixin,
+    AuthRequiredException,
+)
 from veadk.integrations.ve_identity.mcp_tool import VeIdentityMcpTool
 from veadk.integrations.ve_identity.utils import generate_headers
 
@@ -122,9 +131,7 @@ class VeIdentityMcpToolset(VeIdentityAuthMixin, BaseToolset):
         tool_filter: Optional[Union[ToolPredicate, List[str]]] = None,
         tool_name_prefix: Optional[str] = None,
         errlog: TextIO = sys.stderr,
-        header_provider: Optional[
-            Callable[[ReadonlyContext], Dict[str, str]]
-        ] = None,
+        header_provider: Optional[Callable[[ReadonlyContext], Dict[str, str]]] = None,
     ):
         """Initializes the MCPToolset.
 
@@ -196,6 +203,14 @@ class VeIdentityMcpToolset(VeIdentityAuthMixin, BaseToolset):
         # Add headers from cached credential (from generate_preprocessing_events)
         if self._headers:
             headers.update(self._headers)
+        else:
+            if readonly_context is None:
+                raise ValueError(
+                    "Readonly context is required for VeIdentityMcpToolset."
+                )
+            credential = await self._get_credential(tool_context=readonly_context)
+            # Use None if no headers were collected
+            headers.update(generate_headers(credential))
 
         # Add/override with headers from header_provider if available
         if self._header_provider and readonly_context:
@@ -271,7 +286,9 @@ class VeIdentityMcpToolset(VeIdentityAuthMixin, BaseToolset):
 
         # Try to get credential for authentication
         try:
-            credential: AuthCredential = await self._get_credential(tool_context=tool_context)
+            credential: AuthCredential = await self._get_credential(
+                tool_context=tool_context
+            )
             self._headers = generate_headers(credential)
             # If we got credential successfully, no auth event needed
             return
@@ -298,9 +315,7 @@ class VeIdentityMcpToolset(VeIdentityAuthMixin, BaseToolset):
                 invocation_id=tool_context._invocation_context.invocation_id,
                 author=tool_context._invocation_context.agent.name,
                 branch=tool_context._invocation_context.branch,
-                content=types.Content(
-                    parts=parts, role=tool_context.user_content.role
-                ),
+                content=types.Content(parts=parts, role=tool_context.user_content.role),
                 long_running_tool_ids=long_running_tool_ids,
             )
 
