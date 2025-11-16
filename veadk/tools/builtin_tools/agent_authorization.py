@@ -95,9 +95,9 @@ async def check_agent_authorization(
         # Parse role_id from workload_token
         role_id = _extract_role_id_from_jwt(workload_token)
 
-        principal = {"Type": "User", "Id": user_id}
-        operation = {"Type": "Action", "Id": "invoke"}
-        resource = {"Type": "Agent", "Id": role_id}
+        principal = {"Type": "user", "Id": user_id}
+        operation = {"Type": "action", "Id": "invoke"}
+        resource = {"Type": "agent", "Id": role_id}
 
         allowed = identity_client.check_permission(
             principal=principal, operation=operation, resource=resource
