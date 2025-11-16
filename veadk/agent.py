@@ -50,7 +50,6 @@ from veadk.utils.logger import get_logger
 from veadk.utils.patches import patch_asyncio, patch_tracer
 from veadk.version import VERSION
 
-patch_tracer()
 patch_asyncio()
 logger = get_logger(__name__)
 
