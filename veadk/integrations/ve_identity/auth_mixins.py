@@ -70,8 +70,18 @@ oauth2_scheme = dict_to_auth_scheme(
 class AuthRequiredException(Exception):
     """Exception raised when user authorization is required for OAuth2 flow."""
 
-    def __init__(self, message: str):
+    auth_config: Optional[AuthConfig] = None
+    message: str
+
+    def __init__(self, message: str, auth_config=None):
+        """Initialize the exception.
+
+        Args:
+            message: Custom message to return to the user.
+            auth_config: Optional AuthConfig object containing auth details for preprocessing.
+        """
         self.message = message
+        self.auth_config = auth_config
         super().__init__(message)
 
 
@@ -351,6 +361,7 @@ class OAuth2AuthMixin(BaseAuthMixin):
         on_auth_url: Optional[Callable[[str], Any]] = None,
         # Currently we only use auth_uri to initialize poller, may extend to support other fields like exchanged_auth_credential.
         oauth2_auth_poller: Optional[Callable[[Any], OAuth2AuthPoller]] = None,
+        defer_auth_to_preprocessing: bool = False,
         **kwargs,
     ):
         """Initialize the OAuth2 authentication mixin.
@@ -365,6 +376,10 @@ class OAuth2AuthMixin(BaseAuthMixin):
             force_authentication: If True, forces re-authentication even if cached token exists.
             response_for_auth_required: Custom response to return when user authorization is needed.
                                        If None, returns "Pending User Authorization.".
+            defer_auth_to_preprocessing: If True, defer auth request to preprocessing events
+                                        instead of calling tool_context.request_credential.
+                                        This is useful for toolsets that want to handle auth
+                                        in generate_preprocessing_events.
             **kwargs: Additional arguments passed to parent classes.
         """
         super().__init__(**kwargs)
@@ -375,6 +390,7 @@ class OAuth2AuthMixin(BaseAuthMixin):
         self._response_for_auth_required = response_for_auth_required
         self._on_auth_url = on_auth_url
         self._oauth2_auth_poller = oauth2_auth_poller
+        self._defer_auth_to_preprocessing = defer_auth_to_preprocessing
 
     async def _get_oauth2_token_or_auth_url(
         self, *, tool_context: ToolContext | ReadonlyContext
@@ -437,17 +453,23 @@ class OAuth2AuthMixin(BaseAuthMixin):
             # Need user authorization
             auth_uri = urllib.parse.unquote(response.authorization_url)
             if isinstance(tool_context, ToolContext):
-                # For ToolContext, use the standard request_credential flow
+                # Prepare auth_config with credential
                 auth_config.raw_auth_credential = AuthCredential(
                     auth_type=AuthCredentialTypes.OAUTH2,
                     oauth2=OAuth2Auth(auth_uri=auth_uri),
                     resource_ref=response.resource_ref,
                 )
-                tool_context.request_credential(auth_config=auth_config)  # type: ignore
+
+                # Check if we should defer auth to preprocessing events
+                if not self._defer_auth_to_preprocessing:
+                    # Use the standard request_credential flow
+                    tool_context.request_credential(auth_config=auth_config)  # type: ignore
 
                 # Raise a special exception to indicate auth is required
                 raise AuthRequiredException(
-                    self._response_for_auth_required or "Pending User Authorization."
+                    message=self._response_for_auth_required
+                    or "Pending User Authorization.",
+                    auth_config=auth_config,
                 )
             else:
                 # For ReadonlyContext (e.g., in get_tools), handle OAuth2 flow directly

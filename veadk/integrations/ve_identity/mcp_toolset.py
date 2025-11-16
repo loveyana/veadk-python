@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from typing import List, Dict, Any
+from typing import AsyncGenerator, Callable, List, Dict, Any
 from typing import Optional
 from typing import TextIO
 from typing import Union
@@ -27,6 +27,7 @@ from typing_extensions import override
 
 from mcp import StdioServerParameters, ClientSession
 from mcp.types import ListToolsResult
+from google.adk.auth.auth_credential import AuthCredential
 
 from google.adk.tools.mcp_tool.mcp_session_manager import (
     retry_on_closed_resource,
@@ -39,9 +40,13 @@ from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.base_toolset import BaseToolset, ToolPredicate
 from google.adk.tools.tool_configs import ToolArgsConfig, BaseToolConfig
 from google.adk.agents.readonly_context import ReadonlyContext
-
-from veadk.integrations.ve_identity.auth_config import VeIdentityAuthConfig
-from veadk.integrations.ve_identity.auth_mixins import VeIdentityAuthMixin
+from google.adk.events.event import Event
+from google.adk.auth.auth_tool import AuthToolArguments
+from google.adk.models.llm_request import LlmRequest
+from google.adk.tools.tool_context import ToolContext
+from google.adk.flows.llm_flows.functions import generate_client_function_call_id,REQUEST_EUC_FUNCTION_CALL_NAME
+from veadk.integrations.ve_identity.auth_config import VeIdentityAuthConfig, OAuth2AuthConfig
+from veadk.integrations.ve_identity.auth_mixins import VeIdentityAuthMixin, AuthRequiredException
 from veadk.integrations.ve_identity.mcp_tool import VeIdentityMcpTool
 from veadk.integrations.ve_identity.utils import generate_headers
 
@@ -117,6 +122,9 @@ class VeIdentityMcpToolset(VeIdentityAuthMixin, BaseToolset):
         tool_filter: Optional[Union[ToolPredicate, List[str]]] = None,
         tool_name_prefix: Optional[str] = None,
         errlog: TextIO = sys.stderr,
+        header_provider: Optional[
+            Callable[[ReadonlyContext], Dict[str, str]]
+        ] = None,
     ):
         """Initializes the MCPToolset.
 
@@ -136,14 +144,19 @@ class VeIdentityMcpToolset(VeIdentityAuthMixin, BaseToolset):
           tool_name_prefix: A prefix to be added to the name of each tool in this
             toolset.
           errlog: TextIO stream for error logging.
+          header_provider: A callable that takes a ReadonlyContext and returns a
+            dictionary of headers to be used for the MCP session.
         """
         if not connection_params:
             raise ValueError("Missing connection params in VeIdentityMcpToolset.")
 
-        # Initialize mixins first
-        super().__init__(
-            auth_config=auth_config,
-        )
+        # Initialize mixins first with defer_auth_to_preprocessing=True for OAuth2
+        # This allows us to handle auth in generate_preprocessing_events
+        init_kwargs = {"auth_config": auth_config}
+        if isinstance(auth_config, OAuth2AuthConfig):
+            init_kwargs["defer_auth_to_preprocessing"] = True
+
+        super().__init__(**init_kwargs)
 
         # Store Identity specific configuration
         self._auth_config = auth_config
@@ -151,12 +164,16 @@ class VeIdentityMcpToolset(VeIdentityAuthMixin, BaseToolset):
         self._tool_filter = tool_filter
         self._tool_name_prefix = tool_name_prefix
         self._errlog = errlog
+        self._header_provider = header_provider
 
         # Create MCP session manager
         self._mcp_session_manager = MCPSessionManager(
             connection_params=connection_params,
             errlog=errlog,
         )
+
+        # Cache for headers generated from credential to avoid repeated authentication
+        self._headers: Optional[Dict[str, str]] = None
 
     @retry_on_closed_resource
     @override
@@ -173,17 +190,29 @@ class VeIdentityMcpToolset(VeIdentityAuthMixin, BaseToolset):
         Returns:
             List[BaseTool]: A list of tools available under the specified context.
         """
-        if readonly_context is None:
-            raise ValueError("Readonly context is required for VeIdentityMcpToolset.")
+        # Merge cached headers from generate_preprocessing_events with header_provider
+        headers = {}
 
-        # Get credential for authentication
-        credential = await self._get_credential(tool_context=readonly_context)
+        # Add headers from cached credential (from generate_preprocessing_events)
+        if self._headers:
+            headers.update(self._headers)
 
-        headers = generate_headers(credential)
+        # Add/override with headers from header_provider if available
+        if self._header_provider and readonly_context:
+            provider_headers = self._header_provider(readonly_context)
+            if provider_headers:
+                headers.update(provider_headers)
+
+        # Use None if no headers were collected
+        headers = headers if headers else None
+
         # Get session from session manager
-        session: ClientSession = await self._mcp_session_manager.create_session(
-            headers=headers
-        )
+        try:
+            session: ClientSession = await self._mcp_session_manager.create_session(
+                headers=headers
+            )
+        except Exception as e:
+            raise ConnectionError(f"Failed to create MCP session") from e
 
         # Fetch available tools from the MCP server
         tools_response: ListToolsResult = await session.list_tools()
@@ -221,6 +250,59 @@ class VeIdentityMcpToolset(VeIdentityAuthMixin, BaseToolset):
                     return False
 
         return True
+
+    async def generate_preprocessing_events(
+        self, *, tool_context: ToolContext, llm_request: LlmRequest
+    ) -> AsyncGenerator[Event, None]:
+        """Generate preprocessing events for authentication.
+
+        This method handles OAuth2 authentication by generating an auth event
+        when user authorization is required.
+
+        Args:
+            tool_context: The tool context for accessing session state.
+            llm_request: The LLM request being processed.
+
+        Yields:
+            Event: Authentication event if user authorization is required.
+        """
+        from google.genai import types
+        import uuid
+
+        # Try to get credential for authentication
+        try:
+            credential: AuthCredential = await self._get_credential(tool_context=tool_context)
+            self._headers = generate_headers(credential)
+            # If we got credential successfully, no auth event needed
+            return
+        except AuthRequiredException as e:
+            # If auth_config is None, it means we are in the middle of the auth flow
+            if e.auth_config is None:
+                raise
+            # Generate auth event similar to the reference implementation
+            parts = []
+            long_running_tool_ids = set()
+
+            request_euc_function_call = types.FunctionCall(
+                name=REQUEST_EUC_FUNCTION_CALL_NAME,
+                args=AuthToolArguments(
+                    function_call_id=tool_context.function_call_id,
+                    auth_config=e.auth_config,
+                ).model_dump(exclude_none=True, by_alias=True),
+            )
+            request_euc_function_call.id = generate_client_function_call_id()
+            long_running_tool_ids.add(request_euc_function_call.id)
+            parts.append(types.Part(function_call=request_euc_function_call))
+
+            return Event(
+                invocation_id=tool_context._invocation_context.invocation_id,
+                author=tool_context._invocation_context.agent.name,
+                branch=tool_context._invocation_context.branch,
+                content=types.Content(
+                    parts=parts, role=tool_context.user_content.role
+                ),
+                long_running_tool_ids=long_running_tool_ids,
+            )
 
     async def close(self) -> None:
         """Performs cleanup and releases resources held by the toolset.
