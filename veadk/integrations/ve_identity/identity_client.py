@@ -338,6 +338,24 @@ class IdentityClient:
         )
 
     @refresh_credentials
+    def create_permission_namespace(
+        self, name: str
+    ) -> volcenginesdkid.CreateNamespaceResponse:
+        """Create a permission namespace in the identity service.
+
+        Args:
+            name: Name of the permission namespace.
+
+        Returns:
+            Response object containing the created namespace information.
+        """
+        logger.info(f"Creating permission namespace {name}...")
+
+        return self._api_client.create_namespace(
+            volcenginesdkid.CreateNamespaceRequest(namespace_name=name),
+        )
+
+    @refresh_credentials
     def get_workload_access_token(
         self,
         workload_name: Optional[str] = None,
