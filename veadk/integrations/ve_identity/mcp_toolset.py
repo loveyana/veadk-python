@@ -203,11 +203,7 @@ class VeIdentityMcpToolset(VeIdentityAuthMixin, BaseToolset):
         # Add headers from cached credential (from generate_preprocessing_events)
         if self._headers:
             headers.update(self._headers)
-        else:
-            if readonly_context is None:
-                raise ValueError(
-                    "Readonly context is required for VeIdentityMcpToolset."
-                )
+        elif readonly_context:
             credential = await self._get_credential(tool_context=readonly_context)
             # Use None if no headers were collected
             headers.update(generate_headers(credential))
@@ -301,7 +297,7 @@ class VeIdentityMcpToolset(VeIdentityAuthMixin, BaseToolset):
 
             function_id = generate_client_function_call_id()
             request_euc_function_call = types.FunctionCall(
-                id=function_id,
+                id=generate_client_function_call_id(),
                 name=REQUEST_EUC_FUNCTION_CALL_NAME,
                 args=AuthToolArguments(
                     function_call_id=tool_context.function_call_id or function_id,
