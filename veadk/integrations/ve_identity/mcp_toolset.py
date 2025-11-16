@@ -207,6 +207,8 @@ class VeIdentityMcpToolset(VeIdentityAuthMixin, BaseToolset):
             credential = await self._get_credential(tool_context=readonly_context)
             # Use None if no headers were collected
             headers.update(generate_headers(credential))
+        else:
+            return self._tools or []
 
         # Add/override with headers from header_provider if available
         if self._header_provider and readonly_context:
@@ -223,7 +225,7 @@ class VeIdentityMcpToolset(VeIdentityAuthMixin, BaseToolset):
                 headers=headers
             )
         except Exception as e:
-            raise ConnectionError(f"Failed to create MCP session") from e
+            raise ConnectionError("Failed to create MCP session") from e
 
         # Fetch available tools from the MCP server
         tools_response: ListToolsResult = await session.list_tools()
@@ -243,6 +245,8 @@ class VeIdentityMcpToolset(VeIdentityAuthMixin, BaseToolset):
 
             if self._is_tool_selected(mcp_tool, readonly_context):
                 tools.append(mcp_tool)
+
+        self._tools = tools
         return tools
 
     def _is_tool_selected(

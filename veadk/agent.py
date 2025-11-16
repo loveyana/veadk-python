@@ -47,7 +47,7 @@ from veadk.processors import BaseRunProcessor, NoOpRunProcessor
 from veadk.prompts.agent_default_prompt import DEFAULT_DESCRIPTION, DEFAULT_INSTRUCTION
 from veadk.tracing.base_tracer import BaseTracer
 from veadk.utils.logger import get_logger
-from veadk.utils.patches import patch_asyncio, patch_tracer
+from veadk.utils.patches import patch_asyncio
 from veadk.version import VERSION
 
 patch_asyncio()
