@@ -282,7 +282,6 @@ class VeIdentityMcpToolset(VeIdentityAuthMixin, BaseToolset):
             Event: Authentication event if user authorization is required.
         """
         from google.genai import types
-        import uuid
 
         # Try to get credential for authentication
         try:
