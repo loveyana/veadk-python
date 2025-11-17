@@ -785,9 +785,9 @@ class IdentityClient:
         # Format: permit(principal: Type::"Id", action: Type::"Id", resource: Type::"Id");
         cedar_policy = (
             f"permit(\n"
-            f"  principal == {principal['Type']}::{principal['Id']},\n"
-            f"  action == {operation['Type']}::{operation['Id']},\n"
-            f"  resource == {resource['Type']}::{resource['Id']}\n"
+            f'  principal == {principal["Type"]}::"{principal["Id"]}",\n'
+            f'  action == {operation["Type"]}::"{operation["Id"]}",\n'
+            f'  resource == {resource["Type"]}::"{resource["Id"]}"\n'
             f");"
         )
 
