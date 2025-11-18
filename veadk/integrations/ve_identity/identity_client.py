@@ -304,7 +304,6 @@ class IdentityClient:
 
         return sts_credential
 
-    @refresh_credentials
     def create_oauth2_credential_provider(
         self, request_params: Dict[str, Any]
     ) -> volcenginesdkid.CreateOauth2CredentialProviderResponse:
@@ -322,7 +321,6 @@ class IdentityClient:
             volcenginesdkid.CreateOauth2CredentialProviderRequest(**request_params),
         )
 
-    @refresh_credentials
     def create_api_key_credential_provider(
         self, request_params: Dict[str, Any]
     ) -> volcenginesdkid.CreateApiKeyCredentialProviderResponse:
@@ -340,7 +338,6 @@ class IdentityClient:
             volcenginesdkid.CreateApiKeyCredentialProviderRequest(**request_params),
         )
 
-    @refresh_credentials
     def create_permission_namespace(
         self, name: str
     ) -> volcenginesdkid.CreateNamespaceResponse:
@@ -434,7 +431,6 @@ class IdentityClient:
 
         return convert_response(resp)
 
-    @refresh_credentials
     def create_workload_identity(
         self, name: Optional[str] = None
     ) -> volcenginesdkid.CreateWorkloadIdentityResponse:
@@ -639,7 +635,6 @@ class IdentityClient:
                     logger.error(f"Failed to parse DCR response: {e}")
                     raise ValueError(f"Invalid DCR response: {e}") from e
 
-    @refresh_credentials
     async def create_oauth2_credential_provider_with_dcr(
         self, request_params: Dict[str, Any]
     ) -> volcenginesdkid.CreateOauth2CredentialProviderResponse:
@@ -760,7 +755,6 @@ class IdentityClient:
         )
         return response.allowed
 
-    @refresh_credentials
     def create_policy(
         self,
         principal: Dict[str, str],
