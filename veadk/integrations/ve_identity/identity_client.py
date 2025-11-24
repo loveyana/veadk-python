@@ -70,15 +70,14 @@ def refresh_credentials(func):
         def try_get_vefaas_credentials():
             """Attempt to retrieve credentials from VeFaaS IAM."""
             try:
-                logger.info("Attempting to fetch credentials from VeFaaS IAM...")
                 ve_iam_cred = get_credential_from_vefaas_iam()
                 return (
                     ve_iam_cred.access_key_id,
                     ve_iam_cred.secret_access_key,
                     ve_iam_cred.session_token,
                 )
-            except FileNotFoundError as e:
-                logger.warning(f"VeFaaS IAM credentials not available: {e}")
+            except FileNotFoundError:
+                pass # If VeFaaS IAM file not found, ignore
             except Exception as e:
                 logger.warning(f"Failed to retrieve credentials from VeFaaS IAM: {e}")
             return None
@@ -92,8 +91,20 @@ def refresh_credentials(func):
             if credentials:
                 ak, sk, session_token = credentials
 
-        # If we have AK/SK but no session token, try to get complete credentials
+        # If we have AK/SK but no session token, or STS credentials are expired,
+        # try to get complete credentials
+        need_refresh = False
         if ak and sk and not session_token:
+            need_refresh = True
+        elif ak and sk and session_token:
+            # Check if STS credentials are expired
+            if self._is_sts_credential_expired():
+                logger.info("STS credentials expired, refreshing...")
+                need_refresh = True
+                # Clear expired session token to force refresh
+                session_token = ""
+
+        if need_refresh:
             # First attempt: try VeFaaS IAM
             credentials = try_get_vefaas_credentials()
             if credentials:
@@ -107,12 +118,10 @@ def refresh_credentials(func):
 
                 if role_trn:
                     try:
-                        logger.info(f"Attempting AssumeRole with role: {role_trn}")
                         sts_credentials = self._assume_role(ak, sk, role_trn)
                         ak = sts_credentials.access_key_id
                         sk = sts_credentials.secret_access_key
                         session_token = sts_credentials.session_token
-                        logger.info("Successfully obtained credentials via AssumeRole")
                     except Exception as e:
                         logger.warning(f"Failed to assume role: {e}")
 
@@ -192,16 +201,9 @@ class IdentityClient:
         self._sts_credential_expires_at: Optional[int] = None
 
     def _get_iam_role_trn_from_vefaas_iam(self) -> Optional[str]:
-        logger.info(
-            f"Try to get IAM Role TRN from VeFaaS IAM file (path={VEFAAS_IAM_CRIDENTIAL_PATH})."
-        )
-
         path = Path(VEFAAS_IAM_CRIDENTIAL_PATH)
 
         if not path.exists():
-            logger.error(
-                f"Get IAM Role TRN from IAM file failed, and VeFaaS IAM file (path={VEFAAS_IAM_CRIDENTIAL_PATH}) not exists. Please check your configuration."
-            )
             return None
 
         with open(VEFAAS_IAM_CRIDENTIAL_PATH, "r") as f:
@@ -233,6 +235,9 @@ class IdentityClient:
     ) -> AssumeRoleCredential:
         """Execute AssumeRole to get STS temporary credentials.
 
+        This method performs the AssumeRole operation and caches the result.
+        Cache validation is handled by the caller (refresh_credentials decorator).
+
         Args:
             access_key: VolcEngine access key
             secret_key: VolcEngine secret key
@@ -244,16 +249,9 @@ class IdentityClient:
         Raises:
             Exception: If AssumeRole fails
         """
-        # Check if the cached credentials are still valid
-        if (
-            self._cached_sts_credential is not None
-            and not self._is_sts_credential_expired()
-        ):
-            logger.info("Using cached STS credentials")
-            return self._cached_sts_credential
-
         logger.info(
-            "Cached STS credentials expired or not found, requesting new credentials..."
+            f"Requesting new STS credentials for role: {role_trn}, "
+            f"session: {settings.veidentity.role_session_name}"
         )
 
         # Create STS client configuration
@@ -272,11 +270,7 @@ class IdentityClient:
             role_session_name=settings.veidentity.role_session_name,
         )
 
-        logger.info(
-            f"Executing AssumeRole for role: {role_trn}, "
-            f"session: {settings.veidentity.role_session_name}"
-        )
-
+        # Execute AssumeRole
         response: volcenginesdksts.AssumeRoleResponse = sts_client.assume_role(
             assume_role_request
         )
@@ -298,18 +292,19 @@ class IdentityClient:
             expires_at_timestamp = calendar.timegm(dt.timetuple())
         except Exception as e:
             logger.warning(f"Failed to parse STS credential expiration time: {e}")
-            # Expires in 1 hour by default
+            # Default to 1 hour expiration
             import time
 
             expires_at_timestamp = int(time.time()) + 3600
 
+        # Create credential object
         sts_credential = AssumeRoleCredential(
             access_key_id=credentials.access_key_id,
             secret_access_key=credentials.secret_access_key,
             session_token=credentials.session_token,
         )
 
-        # Cached credentials and expiration time
+        # Cache credentials and expiration time
         self._cached_sts_credential = sts_credential
         self._sts_credential_expires_at = expires_at_timestamp
 
