@@ -693,7 +693,6 @@ class IdentityClient:
                 # Update request params
                 request_params["config"] = config
 
-                print(request_params)
                 logger.info(
                     f"DCR registration successful, using client_id: {dcr_response.client_id}"
                 )
@@ -797,5 +796,6 @@ class IdentityClient:
             volcenginesdkid.CreatePolicyRequest(
                 namespace_name=namespace,
                 policy=cedar_policy,
+                description=f"Policy for {principal['Id']} to {operation['Id']} on {resource['Id']}",
             )
         )
