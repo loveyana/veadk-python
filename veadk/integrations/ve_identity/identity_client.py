@@ -77,7 +77,7 @@ def refresh_credentials(func):
                     ve_iam_cred.session_token,
                 )
             except FileNotFoundError:
-                pass # If VeFaaS IAM file not found, ignore
+                pass  # If VeFaaS IAM file not found, ignore
             except Exception as e:
                 logger.warning(f"Failed to retrieve credentials from VeFaaS IAM: {e}")
             return None

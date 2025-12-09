@@ -16,12 +16,14 @@ from functools import wraps
 
 import click
 
+from veadk.a2a.ve_middlewares import build_a2a_auth_middleware
+from veadk.auth.credential_service import VeCredentialService
 from veadk.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
-def patch_adkwebserver_disable_openapi():
+def patch_adkwebserver_disable_openapi(credential_service: VeCredentialService):
     """
     Monkey patch AdkWebServer to disable OpenAPI documentation endpoints.
 
@@ -48,6 +50,13 @@ def patch_adkwebserver_disable_openapi():
                 continue
             new_routes.append(route)
         app.router.routes = new_routes
+        app.add_middleware(
+            build_a2a_auth_middleware(
+                app_name="",
+                credential_service=credential_service,
+                auth_method="header",
+            )
+        )
 
         return app
 
@@ -86,7 +95,7 @@ def web(ctx, *args, **kwargs) -> None:
     from veadk.agents.parallel_agent import ParallelAgent
     from veadk.agents.sequential_agent import SequentialAgent
 
-    def before_get_runner_async(func):
+    def before_get_runner_async(func, credential_service: VeCredentialService):
         logger.info("Hook before `get_runner_async`")
 
         @wraps(func)
@@ -95,7 +104,6 @@ def web(ctx, *args, **kwargs) -> None:
             app_name: str = args[1]
             """Returns the cached runner for the given app."""
             agent_or_app = self.agent_loader.load_agent(app_name)
-
             if isinstance(agent_or_app, (SequentialAgent, LoopAgent, ParallelAgent)):
                 logger.warning(
                     "Detect VeADK workflow agent, the short-term memory and long-term memory of each sub agent are useless."
@@ -103,7 +111,6 @@ def web(ctx, *args, **kwargs) -> None:
 
             if isinstance(agent_or_app, Agent):
                 logger.info("Detect VeADK Agent.")
-
                 if agent_or_app.short_term_memory:
                     self.session_service = (
                         agent_or_app.short_term_memory.session_service
@@ -124,11 +131,14 @@ def web(ctx, *args, **kwargs) -> None:
 
         return wrapper
 
+    # Create VeCredentialService instance and pass it to ADK web server
+    credential_service = VeCredentialService()
+
     adk_web_server.AdkWebServer.get_runner_async = before_get_runner_async(
-        adk_web_server.AdkWebServer.get_runner_async
+        adk_web_server.AdkWebServer.get_runner_async, credential_service
     )
 
-    patch_adkwebserver_disable_openapi()
+    patch_adkwebserver_disable_openapi(credential_service)
 
     from google.adk.cli.cli_tools_click import cli_web
 
