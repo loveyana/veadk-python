@@ -101,6 +101,7 @@ def web(ctx, *args, **kwargs) -> None:
         @wraps(func)
         async def wrapper(*args, **kwargs) -> ADKRunner:
             self: adk_web_server.AdkWebServer = args[0]
+            self.credential_service = credential_service
             app_name: str = args[1]
             """Returns the cached runner for the given app."""
             agent_or_app = self.agent_loader.load_agent(app_name)
