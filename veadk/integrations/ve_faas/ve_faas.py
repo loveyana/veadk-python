@@ -32,7 +32,7 @@ from veadk.integrations.ve_faas.ve_faas_utils import (
     zip_and_encode_folder,
 )
 from veadk.utils.logger import get_logger
-from veadk.utils.misc import formatted_timestamp
+from veadk.utils.misc import formatted_timestamp, getenv
 from veadk.utils.volcengine_sign import ve_request
 
 logger = get_logger(__name__)
@@ -114,10 +114,11 @@ class VeFaaS:
                 name=function_name,
                 description="Created by VeADK (Volcengine Agent Development Kit)",
                 tags=[TagForCreateFunctionInput(key="provider", value="veadk")],
-                runtime="native-python3.10/v1",
+                runtime="native-python3.12/v1",
                 request_timeout=1800,
                 envs=envs,
                 memory_mb=2048,
+                role=getenv("IAM_ROLE", None, allow_false_values=True),
             )
         )
 

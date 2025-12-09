@@ -138,9 +138,15 @@ def intercept_new_message(process_func):
                 **kwargs,
             ):
                 yield event
+                event_metadata = f"| agent_name: {event.author} , user_id: {user_id} , session_id: {session_id} , invocation_id: {event.invocation_id}"
                 if event.get_function_calls():
                     for function_call in event.get_function_calls():
-                        logger.debug(f"Function call: {function_call}")
+                        logger.debug(f"Function call: {function_call} {event_metadata}")
+                elif event.get_function_responses():
+                    for function_response in event.get_function_responses():
+                        logger.debug(
+                            f"Function response: {function_response} {event_metadata}"
+                        )
                 elif (
                     event.content is not None
                     and event.content.parts
@@ -148,7 +154,7 @@ def intercept_new_message(process_func):
                     and len(event.content.parts[0].text.strip()) > 0
                 ):
                     final_output = event.content.parts[0].text
-                    logger.debug(f"Event output: {final_output}")
+                    logger.debug(f"Event output: {final_output} {event_metadata}")
 
             post_run_process(self)
 
@@ -492,17 +498,13 @@ class Runner(ADKRunner):
                         yield event
 
                 async for event in event_generator():
-                    if event.get_function_calls():
-                        for function_call in event.get_function_calls():
-                            logger.debug(f"Function call: {function_call}")
-                    elif (
+                    if (
                         event.content is not None
                         and event.content.parts
                         and event.content.parts[0].text is not None
                         and len(event.content.parts[0].text.strip()) > 0
                     ):
                         final_output = event.content.parts[0].text
-                        logger.debug(f"Event output: {final_output}")
             except LlmCallsLimitExceededError as e:
                 logger.warning(f"Max number of llm calls limit exceeded: {e}")
                 final_output = ""
@@ -672,7 +674,7 @@ class Runner(ADKRunner):
         return eval_set_path
 
     async def save_session_to_long_term_memory(
-        self, session_id: str, user_id: str = "", app_name: str = ""
+        self, session_id: str, user_id: str = "", app_name: str = "", **kwargs
     ) -> None:
         """Save the specified session to long-term memory.
 
@@ -728,5 +730,5 @@ class Runner(ADKRunner):
             )
             return
 
-        await self.long_term_memory.add_session_to_memory(session)
+        await self.long_term_memory.add_session_to_memory(session, kwargs=kwargs)
         logger.info(f"Add session `{session.id}` to long term memory.")

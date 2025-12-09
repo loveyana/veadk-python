@@ -70,14 +70,15 @@ def refresh_credentials(func):
         def try_get_vefaas_credentials():
             """Attempt to retrieve credentials from VeFaaS IAM."""
             try:
+                logger.info("Attempting to fetch credentials from VeFaaS IAM...")
                 ve_iam_cred = get_credential_from_vefaas_iam()
                 return (
                     ve_iam_cred.access_key_id,
                     ve_iam_cred.secret_access_key,
                     ve_iam_cred.session_token,
                 )
-            except FileNotFoundError:
-                pass  # If VeFaaS IAM file not found, ignore
+            except FileNotFoundError as e:
+                logger.warning(f"VeFaaS IAM credentials not available: {e}")
             except Exception as e:
                 logger.warning(f"Failed to retrieve credentials from VeFaaS IAM: {e}")
             return None
@@ -91,41 +92,20 @@ def refresh_credentials(func):
             if credentials:
                 ak, sk, session_token = credentials
 
-        # If we have AK/SK but no session token, or STS credentials are expired,
-        # try to get complete credentials
-        need_refresh = False
+        # Step 4: If still no session_token, try AssumeRole
         if ak and sk and not session_token:
-            need_refresh = True
-        elif ak and sk and session_token:
-            # Check if STS credentials are expired
-            if self._is_sts_credential_expired():
-                logger.info("STS credentials expired, refreshing...")
-                need_refresh = True
-                # Clear expired session token to force refresh
-                session_token = ""
+            if role_trn := self._get_iam_role_trn_from_vefaas_iam() or os.getenv(
+                "RUNTIME_IAM_ROLE_TRN", ""
+            ):
+                try:
+                    sts_cred = self._assume_role(ak, sk, role_trn)
+                    ak = sts_cred.access_key_id
+                    sk = sts_cred.secret_access_key
+                    session_token = sts_cred.session_token
+                except Exception as e:
+                    logger.warning(f"Failed to assume role: {e}")
 
-        if need_refresh:
-            # First attempt: try VeFaaS IAM
-            credentials = try_get_vefaas_credentials()
-            if credentials:
-                ak, sk, session_token = credentials
-
-            # Second attempt: if still no session token, try AssumeRole
-            if not session_token:
-                role_trn = self._get_iam_role_trn_from_vefaas_iam() or os.getenv(
-                    "RUNTIME_IAM_ROLE_TRN", ""
-                )
-
-                if role_trn:
-                    try:
-                        sts_credentials = self._assume_role(ak, sk, role_trn)
-                        ak = sts_credentials.access_key_id
-                        sk = sts_credentials.secret_access_key
-                        session_token = sts_credentials.session_token
-                    except Exception as e:
-                        logger.warning(f"Failed to assume role: {e}")
-
-        # Update configuration with the credentials
+        # Step 5: Update configuration with the credentials
         self._api_client.api_client.configuration.ak = ak
         self._api_client.api_client.configuration.sk = sk
         self._api_client.api_client.configuration.session_token = session_token
