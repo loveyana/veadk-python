@@ -27,7 +27,6 @@ import aiohttp
 import volcenginesdkid
 import volcenginesdkcore
 import volcenginesdksts
-from volcenginesdkcore.rest import ApiException
 
 from veadk.consts import VEFAAS_IAM_CRIDENTIAL_PATH
 from veadk.integrations.ve_identity.models import (
@@ -67,40 +66,46 @@ def refresh_credentials(func):
             "VOLCENGINE_SESSION_TOKEN", ""
         )
 
-        # If credentials are not available, try to get from VeFaaS IAM
-        if not (ak and sk):
+        # Helper function to attempt VeFaaS IAM credential retrieval
+        def try_get_vefaas_credentials():
+            """Attempt to retrieve credentials from VeFaaS IAM."""
             try:
-                logger.info(
-                    "Credentials not found in environment, attempting to fetch from VeFaaS IAM..."
-                )
+                logger.info("Attempting to fetch credentials from VeFaaS IAM...")
                 ve_iam_cred = get_credential_from_vefaas_iam()
-                ak = ve_iam_cred.access_key_id
-                sk = ve_iam_cred.secret_access_key
-                session_token = ve_iam_cred.session_token
-                logger.info("Successfully retrieved credentials from VeFaaS IAM")
+                return (
+                    ve_iam_cred.access_key_id,
+                    ve_iam_cred.secret_access_key,
+                    ve_iam_cred.session_token,
+                )
             except FileNotFoundError as e:
                 logger.warning(f"VeFaaS IAM credentials not available: {e}")
             except Exception as e:
                 logger.warning(f"Failed to retrieve credentials from VeFaaS IAM: {e}")
+            return None
 
-        if not session_token and ak and sk:
-            role_trn = self._get_iam_role_trn_from_vefaas_iam()
-            if not role_trn:
-                role_trn = os.getenv("RUNTIME_IAM_ROLE_TRN", "")
-            # If there is no session_token and role_trn is configured, execute AssumeRole
-            if role_trn:
+        # If no AK/SK, try to get from VeFaaS IAM
+        if not (ak and sk):
+            logger.info(
+                "Credentials not found in environment, attempting to fetch from VeFaaS IAM..."
+            )
+            credentials = try_get_vefaas_credentials()
+            if credentials:
+                ak, sk, session_token = credentials
+
+        # Step 4: If still no session_token, try AssumeRole
+        if ak and sk and not session_token:
+            if role_trn := self._get_iam_role_trn_from_vefaas_iam() or os.getenv(
+                "RUNTIME_IAM_ROLE_TRN", ""
+            ):
                 try:
-                    logger.info(
-                        f"No session token found, attempting AssumeRole with role: {role_trn}"
-                    )
-                    sts_credentials = self._assume_role(ak, sk, role_trn)
-                    ak = sts_credentials.access_key_id
-                    sk = sts_credentials.secret_access_key
-                    session_token = sts_credentials.session_token
-                except ApiException as e:
-                    logger.warning(f"Failed to assume role: {e.reason}")
+                    sts_cred = self._assume_role(ak, sk, role_trn)
+                    ak = sts_cred.access_key_id
+                    sk = sts_cred.secret_access_key
+                    session_token = sts_cred.session_token
+                except Exception as e:
+                    logger.warning(f"Failed to assume role: {e}")
 
-        # Update configuration with the credentials
+        # Step 5: Update configuration with the credentials
         self._api_client.api_client.configuration.ak = ak
         self._api_client.api_client.configuration.sk = sk
         self._api_client.api_client.configuration.session_token = session_token
@@ -176,16 +181,9 @@ class IdentityClient:
         self._sts_credential_expires_at: Optional[int] = None
 
     def _get_iam_role_trn_from_vefaas_iam(self) -> Optional[str]:
-        logger.info(
-            f"Try to get IAM Role TRN from VeFaaS IAM file (path={VEFAAS_IAM_CRIDENTIAL_PATH})."
-        )
-
         path = Path(VEFAAS_IAM_CRIDENTIAL_PATH)
 
         if not path.exists():
-            logger.error(
-                f"Get IAM Role TRN from IAM file failed, and VeFaaS IAM file (path={VEFAAS_IAM_CRIDENTIAL_PATH}) not exists. Please check your configuration."
-            )
             return None
 
         with open(VEFAAS_IAM_CRIDENTIAL_PATH, "r") as f:
@@ -217,6 +215,9 @@ class IdentityClient:
     ) -> AssumeRoleCredential:
         """Execute AssumeRole to get STS temporary credentials.
 
+        This method performs the AssumeRole operation and caches the result.
+        Cache validation is handled by the caller (refresh_credentials decorator).
+
         Args:
             access_key: VolcEngine access key
             secret_key: VolcEngine secret key
@@ -228,16 +229,9 @@ class IdentityClient:
         Raises:
             Exception: If AssumeRole fails
         """
-        # Check if the cached credentials are still valid
-        if (
-            self._cached_sts_credential is not None
-            and not self._is_sts_credential_expired()
-        ):
-            logger.info("Using cached STS credentials")
-            return self._cached_sts_credential
-
         logger.info(
-            "Cached STS credentials expired or not found, requesting new credentials..."
+            f"Requesting new STS credentials for role: {role_trn}, "
+            f"session: {settings.veidentity.role_session_name}"
         )
 
         # Create STS client configuration
@@ -256,11 +250,7 @@ class IdentityClient:
             role_session_name=settings.veidentity.role_session_name,
         )
 
-        logger.info(
-            f"Executing AssumeRole for role: {role_trn}, "
-            f"session: {settings.veidentity.role_session_name}"
-        )
-
+        # Execute AssumeRole
         response: volcenginesdksts.AssumeRoleResponse = sts_client.assume_role(
             assume_role_request
         )
@@ -282,18 +272,19 @@ class IdentityClient:
             expires_at_timestamp = calendar.timegm(dt.timetuple())
         except Exception as e:
             logger.warning(f"Failed to parse STS credential expiration time: {e}")
-            # Expires in 1 hour by default
+            # Default to 1 hour expiration
             import time
 
             expires_at_timestamp = int(time.time()) + 3600
 
+        # Create credential object
         sts_credential = AssumeRoleCredential(
             access_key_id=credentials.access_key_id,
             secret_access_key=credentials.secret_access_key,
             session_token=credentials.session_token,
         )
 
-        # Cached credentials and expiration time
+        # Cache credentials and expiration time
         self._cached_sts_credential = sts_credential
         self._sts_credential_expires_at = expires_at_timestamp
 
@@ -304,6 +295,7 @@ class IdentityClient:
 
         return sts_credential
 
+    @refresh_credentials
     def create_oauth2_credential_provider(
         self, request_params: Dict[str, Any]
     ) -> volcenginesdkid.CreateOauth2CredentialProviderResponse:
@@ -321,6 +313,7 @@ class IdentityClient:
             volcenginesdkid.CreateOauth2CredentialProviderRequest(**request_params),
         )
 
+    @refresh_credentials
     def create_api_key_credential_provider(
         self, request_params: Dict[str, Any]
     ) -> volcenginesdkid.CreateApiKeyCredentialProviderResponse:
@@ -336,23 +329,6 @@ class IdentityClient:
 
         return self._api_client.create_api_key_credential_provider(
             volcenginesdkid.CreateApiKeyCredentialProviderRequest(**request_params),
-        )
-
-    def create_permission_namespace(
-        self, name: str
-    ) -> volcenginesdkid.CreateNamespaceResponse:
-        """Create a permission namespace in the identity service.
-
-        Args:
-            name: Name of the permission namespace.
-
-        Returns:
-            Response object containing the created namespace information.
-        """
-        logger.info(f"Creating permission namespace {name}...")
-
-        return self._api_client.create_namespace(
-            volcenginesdkid.CreateNamespaceRequest(namespace_name=name),
         )
 
     @refresh_credentials
@@ -431,6 +407,7 @@ class IdentityClient:
 
         return convert_response(resp)
 
+    @refresh_credentials
     def create_workload_identity(
         self, name: Optional[str] = None
     ) -> volcenginesdkid.CreateWorkloadIdentityResponse:
@@ -449,6 +426,23 @@ class IdentityClient:
 
         return self._api_client.create_workload_identity(
             volcenginesdkid.CreateWorkloadIdentityRequest(name=name),
+        )
+
+    def create_permission_namespace(
+        self, name: str
+    ) -> volcenginesdkid.CreateNamespaceResponse:
+        """Create a permission namespace in the identity service.
+
+        Args:
+            name: Name of the permission namespace.
+
+        Returns:
+            Response object containing the created namespace information.
+        """
+        logger.info(f"Creating permission namespace {name}...")
+
+        return self._api_client.create_namespace(
+            volcenginesdkid.CreateNamespaceRequest(namespace_name=name),
         )
 
     @refresh_credentials
@@ -635,6 +629,7 @@ class IdentityClient:
                     logger.error(f"Failed to parse DCR response: {e}")
                     raise ValueError(f"Invalid DCR response: {e}") from e
 
+    @refresh_credentials
     async def create_oauth2_credential_provider_with_dcr(
         self, request_params: Dict[str, Any]
     ) -> volcenginesdkid.CreateOauth2CredentialProviderResponse:
@@ -717,7 +712,7 @@ class IdentityClient:
 
         Args:
             principal: Principal information, e.g., {"Type": "user", "Id": "user123"}
-            operation: Operation to check, e.g., {"Type": "action", "Id": "invoke"}
+            operation: Operation to check, e.g., {"Type": "Action", "Id": "invoke"}
             resource: Resource information, e.g., {"Type": "agent", "Id": "agent456"}
             original_callers: Optional list of original callers.
             namespace: Namespace of the resource. Defaults to "default".
@@ -753,6 +748,136 @@ class IdentityClient:
             f"Permission check result for principal {principal['Id']} on resource {resource['Id']}: {response.allowed}"
         )
         return response.allowed
+
+    def create_user_pool(self, name: str) -> str:
+        from volcenginesdkid import CreateUserPoolRequest, CreateUserPoolResponse
+
+        request = CreateUserPoolRequest(
+            name=name,
+        )
+        response: CreateUserPoolResponse = self._api_client.create_user_pool(request)
+
+        return response.uid
+
+    def get_user_pool(self, name: str) -> str | None:
+        from volcenginesdkid import (
+            ListUserPoolsRequest,
+            ListUserPoolsResponse,
+            FilterForListUserPoolsInput,
+            DataForListUsersOutput,
+        )
+
+        request = ListUserPoolsRequest(
+            page_number=1,
+            page_size=1,
+            filter=FilterForListUserPoolsInput(
+                name=name,
+            ),
+        )
+        response: ListUserPoolsResponse = self._api_client.list_user_pools(request)
+        if response.total_count == 0:
+            return None
+
+        user_pool: DataForListUsersOutput = response.data[0]
+        return user_pool.uid
+
+    def create_user_pool_client(
+        self, user_pool_uid: str, name: str, client_type: str
+    ) -> tuple[str, str]:
+        from volcenginesdkid import (
+            CreateUserPoolClientRequest,
+            CreateUserPoolClientResponse,
+        )
+
+        request = CreateUserPoolClientRequest(
+            user_pool_uid=user_pool_uid,
+            name=name,
+            client_type=client_type,
+        )
+        response: CreateUserPoolClientResponse = (
+            self._api_client.create_user_pool_client(request)
+        )
+        return response.uid, response.client_secret
+
+    def register_callback_for_user_pool_client(
+        self,
+        user_pool_uid: str,
+        client_uid: str,
+        callback_url: str,
+        web_origin: str,
+    ):
+        from volcenginesdkid import (
+            GetUserPoolClientRequest,
+            GetUserPoolClientResponse,
+            UpdateUserPoolClientRequest,
+        )
+
+        request = GetUserPoolClientRequest(
+            user_pool_uid=user_pool_uid,
+            client_uid=client_uid,
+        )
+        response: GetUserPoolClientResponse = self._api_client.get_user_pool_client(
+            request
+        )
+
+        allowed_callback_urls = response.allowed_callback_urls
+        if not allowed_callback_urls:
+            allowed_callback_urls = []
+        allowed_callback_urls.append(callback_url)
+        allowed_web_origins = response.allowed_web_origins
+        if not allowed_web_origins:
+            allowed_web_origins = []
+        allowed_web_origins.append(web_origin)
+
+        request2 = UpdateUserPoolClientRequest(
+            user_pool_uid=user_pool_uid,
+            client_uid=client_uid,
+            name=response.name,
+            description=response.description,
+            allowed_callback_urls=allowed_callback_urls,
+            allowed_logout_urls=response.allowed_logout_urls,
+            allowed_web_origins=allowed_web_origins,
+            allowed_cors=response.allowed_cors,
+            id_token=response.id_token,
+            refresh_token=response.refresh_token,
+        )
+        self._api_client.update_user_pool_client(request2)
+
+    def get_user_pool_client(
+        self, user_pool_uid: str, name: str
+    ) -> tuple[str, str] | None:
+        from volcenginesdkid import (
+            ListUserPoolClientsRequest,
+            ListUserPoolClientsResponse,
+            FilterForListUserPoolClientsInput,
+            DataForListUserPoolClientsOutput,
+            GetUserPoolClientRequest,
+            GetUserPoolClientResponse,
+        )
+
+        request = ListUserPoolClientsRequest(
+            user_pool_uid=user_pool_uid,
+            page_number=1,
+            page_size=1,
+            filter=FilterForListUserPoolClientsInput(
+                name=name,
+            ),
+        )
+        response: ListUserPoolClientsResponse = self._api_client.list_user_pool_clients(
+            request
+        )
+        if response.total_count == 0:
+            return None
+
+        client: DataForListUserPoolClientsOutput = response.data[0]
+        request2 = GetUserPoolClientRequest(
+            user_pool_uid=user_pool_uid,
+            client_uid=client.uid,
+        )
+        response2: GetUserPoolClientResponse = self._api_client.get_user_pool_client(
+            request2
+        )
+        return response2.uid, response2.client_secret
 
     def create_policy(
         self,
