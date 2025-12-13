@@ -22,6 +22,7 @@ from typing import Any, Literal
 import requests
 from pydantic import Field
 from typing_extensions import override
+from veadk.utils.auth import VE_TIP_TOKEN_HEADER
 from veadk.utils.misc import getenv
 
 import veadk.config  # noqa E401
@@ -474,9 +475,11 @@ class VikingDBKnowledgeBackend(BaseKnowledgebaseBackend):
         )
         try:
             loop = asyncio.get_running_loop()
-            loop.run_until_complete(
-                coro
-            ) if not loop.is_running() else asyncio.ensure_future(coro)
+            (
+                loop.run_until_complete(coro)
+                if not loop.is_running()
+                else asyncio.ensure_future(coro)
+            )
         except RuntimeError:
             asyncio.run(coro)
         return f"{self._tos_client.bucket_name}/{object_key}"
@@ -537,6 +540,9 @@ class VikingDBKnowledgeBackend(BaseKnowledgebaseBackend):
             },
             path=SEARCH_KNOWLEDGE_PATH,
             method="POST",
+            header={
+                VE_TIP_TOKEN_HEADER: tip_token,
+            },
         )
 
         if response.get("code") != 0:
