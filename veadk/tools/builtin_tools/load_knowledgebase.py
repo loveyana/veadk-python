@@ -91,7 +91,29 @@ you to look up the knowledgebase, you should call load_knowledgebase function wi
         Returns:
         A list of knowledgebase results.
         """
+        from google.adk.auth.auth_credential import AuthCredential
+        from veadk.utils.auth import (
+            VE_TIP_TOKEN_CREDENTIAL_KEY,
+            VE_TIP_TOKEN_HEADER,
+            build_auth_config,
+        )
+
+        # Inject TIP token via header
+        workload_auth_config = build_auth_config(
+            auth_method="apikey",
+            credential_key=VE_TIP_TOKEN_CREDENTIAL_KEY,
+            header_name=VE_TIP_TOKEN_HEADER,
+        )
+
+        tip_credential: "AuthCredential|None" = await tool_context.load_credential(
+            auth_config=workload_auth_config,
+        )
+
         logger.info(f"Search knowledgebase: {self.knowledgebase.name}")
-        response = self.knowledgebase.search(query)
+        response = (
+            self.knowledgebase.search(query, tip_token=tip_credential.api_key)
+            if tip_credential
+            else self.knowledgebase.search(query)
+        )
         logger.info(f"Loaded {len(response)} knowledgebase entries for query: {query}")
         return LoadKnowledgebaseResponse(knowledges=response)

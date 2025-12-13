@@ -60,7 +60,6 @@ async def search_knowledgebase(
 ) -> SearchKnowledgebaseResponse:
     """Searches the knowledgebase of the current user."""
     if isinstance(knowledgebase, KnowledgeBase):
-        from google.adk.agents.callback_context import CallbackContext
         from google.adk.auth.auth_credential import AuthCredential
 
         # Inject TIP token via header
@@ -72,7 +71,6 @@ async def search_knowledgebase(
 
         tip_credential: "AuthCredential|None" = await self.load_credential(
             auth_config=workload_auth_config,
-            callback_context=CallbackContext(self),
         )
 
         entry_list = (
