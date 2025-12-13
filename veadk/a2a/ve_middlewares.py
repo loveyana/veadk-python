@@ -24,7 +24,6 @@ from typing import Callable, Literal, Optional
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
-from volcenginesdkcore.rest import ApiException
 
 
 from veadk.auth.credential_service import VeCredentialService
@@ -188,8 +187,8 @@ class A2AAuthMiddleware(BaseHTTPMiddleware):
                 credential_key=VE_TIP_TOKEN_CREDENTIAL_KEY,
                 credential=workload_auth_config.exchanged_auth_credential,
             )
-        except ApiException as e:
-            logger.warning(f"Failed to get workload token: {e.reason}")
+        except Exception as e:
+            logger.warning(f"Failed to get workload token: {e}")
             workload_token = None
         request.scope["auth"] = workload_token
         # Continue processing the request

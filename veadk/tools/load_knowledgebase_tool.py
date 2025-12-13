@@ -25,6 +25,11 @@ from typing_extensions import override
 
 from veadk.knowledgebase import KnowledgeBase
 from veadk.knowledgebase.entry import KnowledgebaseEntry
+from veadk.utils.auth import (
+    VE_TIP_TOKEN_CREDENTIAL_KEY,
+    VE_TIP_TOKEN_HEADER,
+    build_auth_config,
+)
 from veadk.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -51,11 +56,30 @@ class SearchKnowledgebaseResponse(BaseModel):
 
 
 async def search_knowledgebase(
-    self, query: str, app_name: str
+    self: ToolContext, query: str, app_name: str
 ) -> SearchKnowledgebaseResponse:
     """Searches the knowledgebase of the current user."""
     if isinstance(knowledgebase, KnowledgeBase):
-        entry_list = knowledgebase.search(query)
+        from google.adk.agents.callback_context import CallbackContext
+        from google.adk.auth.auth_credential import AuthCredential
+
+        # Inject TIP token via header
+        workload_auth_config = build_auth_config(
+            auth_method="apikey",
+            credential_key=VE_TIP_TOKEN_CREDENTIAL_KEY,
+            header_name=VE_TIP_TOKEN_HEADER,
+        )
+
+        tip_credential: "AuthCredential|None" = await self.load_credential(
+            auth_config=workload_auth_config,
+            callback_context=CallbackContext(self),
+        )
+
+        entry_list = (
+            knowledgebase.search(query, tip_token=tip_credential.api_key)
+            if tip_credential
+            else knowledgebase.search(query)
+        )
         return SearchKnowledgebaseResponse(knowledges=entry_list)
     else:
         return SearchKnowledgebaseResponse(knowledges=[])

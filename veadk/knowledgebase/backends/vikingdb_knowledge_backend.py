@@ -311,9 +311,14 @@ class VikingDBKnowledgeBackend(BaseKnowledgebaseBackend):
         top_k: int = 5,
         metadata: dict | None = None,
         rerank: bool = True,
+        tip_token: str | None = None,
     ) -> list:
         return self._search_knowledge(
-            query=query, top_k=top_k, metadata=metadata, rerank=rerank
+            query=query,
+            top_k=top_k,
+            metadata=metadata,
+            rerank=rerank,
+            tip_token=tip_token,
         )
 
     def delete_collection(self) -> bool:
@@ -496,7 +501,8 @@ class VikingDBKnowledgeBackend(BaseKnowledgebaseBackend):
         top_k: int = 5,
         metadata: dict | None = None,
         rerank: bool = True,
-        chunk_diffusion_count: int | None = 3,
+        chunk_diffusion_count: int | None = 0,
+        tip_token: str | None = None,
     ) -> list[KnowledgebaseEntry]:
         SEARCH_KNOWLEDGE_PATH = "/api/knowledge/collection/search_knowledge"
 
@@ -556,6 +562,7 @@ class VikingDBKnowledgeBackend(BaseKnowledgebaseBackend):
         body: dict,
         path: str,
         method: Literal["GET", "POST", "PUT", "DELETE"] = "POST",
+        header: dict[str, str] = {},
     ) -> dict:
         VIKINGDB_KNOWLEDGEBASE_BASE_URL = "api-knowledgebase.mlp.cn-beijing.volces.com"
 
@@ -577,6 +584,10 @@ class VikingDBKnowledgeBackend(BaseKnowledgebaseBackend):
             method=method,
             data=body,
         )
+
+        if header:
+            request.headers.update(header)
+
         response = requests.request(
             method=method,
             url=f"https://{VIKINGDB_KNOWLEDGEBASE_BASE_URL}{path}",
