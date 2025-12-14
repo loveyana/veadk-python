@@ -48,7 +48,7 @@ logger = get_logger(__name__)
 
 # Default configuration for token polling
 DEFAULT_POLLING_INTERVAL_SECONDS = 5
-DEFAULT_POLLING_TIMEOUT_SECONDS = 600
+DEFAULT_POLLING_TIMEOUT_SECONDS = 60
 # Authentication loop will break after this many cycles
 DEFAULT_MAX_CYCLES = 10
 
