@@ -15,7 +15,9 @@
 from __future__ import annotations
 
 import os
-from typing import Optional, Union
+from typing import Dict, Literal, Optional, Union
+
+from google.adk.flows.llm_flows.base_llm_flow import BaseLlmFlow
 
 # If user didn't set LITELLM_LOCAL_MODEL_COST_MAP, set it to True
 # to enable local model cost map.
@@ -24,27 +26,28 @@ from typing import Optional, Union
 if not os.getenv("LITELLM_LOCAL_MODEL_COST_MAP"):
     os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 
-from google.adk.agents import LlmAgent, RunConfig
+import uuid
+
+from google.adk.agents import LlmAgent
 from google.adk.agents.base_agent import BaseAgent
+from google.adk.agents.context_cache_config import ContextCacheConfig
 from google.adk.agents.llm_agent import InstructionProvider, ToolUnion
-from google.adk.agents.run_config import StreamingMode
+from google.adk.examples.base_example_provider import BaseExampleProvider
 from google.adk.models.lite_llm import LiteLlm
-from google.adk.runners import Runner
-from google.genai import types
 from pydantic import ConfigDict, Field
 from typing_extensions import Any
 
 from veadk.config import settings
-from veadk.consts import (
-    DEFAULT_AGENT_NAME,
-    DEFAULT_MODEL_EXTRA_CONFIG,
-)
-from veadk.evaluation import EvalSetRecorder
+from veadk.consts import DEFAULT_AGENT_NAME, DEFAULT_MODEL_EXTRA_CONFIG
 from veadk.knowledgebase import KnowledgeBase
 from veadk.memory.long_term_memory import LongTermMemory
 from veadk.memory.short_term_memory import ShortTermMemory
 from veadk.processors import BaseRunProcessor, NoOpRunProcessor
-from veadk.prompts.agent_default_prompt import DEFAULT_DESCRIPTION, DEFAULT_INSTRUCTION
+from veadk.prompts.agent_default_prompt import (
+    DEFAULT_DESCRIPTION,
+    DEFAULT_INSTRUCTION,
+)
+from veadk.prompts.prompt_manager import BasePromptManager
 from veadk.tracing.base_tracer import BaseTracer
 from veadk.utils.logger import get_logger
 from veadk.utils.patches import patch_asyncio, patch_tracer
@@ -67,7 +70,7 @@ class Agent(LlmAgent):
         name (str): The name of the agent.
         description (str): A description of the agent, useful in A2A scenarios.
         instruction (Union[str, InstructionProvider]): The instruction or instruction provider.
-        model_name (str): Name of the model used by the agent.
+        model_name (Union[str, List[str]]): Name of the model used by the agent.
         model_provider (str): Provider of the model (e.g., openai).
         model_api_base (str): The base URL of the model API.
         model_api_key (str): The API key for accessing the model.
@@ -78,15 +81,23 @@ class Agent(LlmAgent):
         short_term_memory (Optional[ShortTermMemory]): Session-based memory for temporary context.
         long_term_memory (Optional[LongTermMemory]): Cross-session memory for persistent user context.
         tracers (list[BaseTracer]): List of tracers used for telemetry and monitoring.
+        enable_authz (bool): Whether to enable agent authorization checks.
+        auto_save_session (bool): Whether to automatically save sessions to long-term memory.
+        skills (list[str]): List of skills that equip the agent with specific capabilities.
+        example_store (Optional[BaseExampleProvider]): Example store for providing example Q/A.
+        enable_shadowchar (bool): Whether to enable shadow character for the agent.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()).split("-")[0])
     name: str = DEFAULT_AGENT_NAME
     description: str = DEFAULT_DESCRIPTION
     instruction: Union[str, InstructionProvider] = DEFAULT_INSTRUCTION
 
-    model_name: str = Field(default_factory=lambda: settings.model.name)
+    model_name: Union[str, list[str]] = Field(
+        default_factory=lambda: settings.model.name
+    )
     model_provider: str = Field(default_factory=lambda: settings.model.provider)
     model_api_base: str = Field(default_factory=lambda: settings.model.api_base)
     model_api_key: str = Field(default_factory=lambda: settings.model.api_key)
@@ -96,12 +107,18 @@ class Agent(LlmAgent):
 
     sub_agents: list[BaseAgent] = Field(default_factory=list, exclude=True)
 
+    prompt_manager: Optional[BasePromptManager] = None
+
     knowledgebase: Optional[KnowledgeBase] = None
 
     short_term_memory: Optional[ShortTermMemory] = None
     long_term_memory: Optional[LongTermMemory] = None
 
     tracers: list[BaseTracer] = []
+
+    enable_responses: bool = False
+
+    context_cache_config: Optional[ContextCacheConfig] = None
 
     run_processor: Optional[BaseRunProcessor] = Field(default=None, exclude=True)
     """Optional run processor for intercepting and processing agent execution flows.
@@ -124,6 +141,18 @@ class Agent(LlmAgent):
     """
 
     enable_authz: bool = False
+
+    auto_save_session: bool = False
+
+    skills: list[str] = Field(default_factory=list)
+
+    skills_mode: Literal["skills_sandbox", "aio_sandbox", "local"] = "skills_sandbox"
+
+    example_store: Optional[BaseExampleProvider] = None
+
+    enable_supervisor: bool = False
+
+    enable_ghostchar: bool = False
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(None)  # for sub_agents init
@@ -151,12 +180,41 @@ class Agent(LlmAgent):
         logger.info(f"Model extra config: {self.model_extra_config}")
 
         if not self.model:
-            self.model = LiteLlm(
-                model=f"{self.model_provider}/{self.model_name}",
-                api_key=self.model_api_key,
-                api_base=self.model_api_base,
-                **self.model_extra_config,
-            )
+            if self.enable_responses:
+                from veadk.models.ark_llm import ArkLlm
+
+                self.model = ArkLlm(
+                    model=f"{self.model_provider}/{self.model_name}",
+                    api_key=self.model_api_key,
+                    api_base=self.model_api_base,
+                    **self.model_extra_config,
+                )
+            else:
+                fallbacks = None
+                if isinstance(self.model_name, list):
+                    if self.model_name:
+                        model_name = self.model_name[0]
+                        fallbacks = [
+                            f"{self.model_provider}/{m}" for m in self.model_name[1:]
+                        ]
+                        logger.info(
+                            f"Using primary model: {model_name}, with fallbacks: {self.model_name[1:]}"
+                        )
+                    else:
+                        model_name = settings.model.name
+                        logger.warning(
+                            f"Empty model_name list provided, using default model from settings: {model_name}"
+                        )
+                else:
+                    model_name = self.model_name
+
+                self.model = LiteLlm(
+                    model=f"{self.model_provider}/{model_name}",
+                    api_key=self.model_api_key,
+                    api_base=self.model_api_base,
+                    fallbacks=fallbacks,
+                    **self.model_extra_config,
+                )
             logger.debug(
                 f"LiteLLM client created with config: {self.model_extra_config}"
             )
@@ -176,6 +234,16 @@ class Agent(LlmAgent):
                 knowledgebase=self.knowledgebase
             )
             self.tools.append(load_knowledgebase_tool)
+
+            if self.knowledgebase.enable_profile:
+                logger.debug(
+                    f"Knowledgebase {self.knowledgebase.index} profile enabled"
+                )
+                from veadk.tools.builtin_tools.load_kb_queries import (
+                    load_kb_queries,
+                )
+
+                self.tools.append(load_kb_queries)
 
         if self.long_term_memory is not None:
             from google.adk.tools import load_memory
@@ -202,67 +270,113 @@ class Agent(LlmAgent):
             else:
                 self.before_agent_callback = check_agent_authorization
 
+        if self.prompt_manager:
+            self.instruction = self.prompt_manager.get_prompt
+
+        if self.auto_save_session:
+            if self.long_term_memory is None:
+                logger.warning(
+                    "auto_save_session is enabled, but long_term_memory is not initialized."
+                )
+            else:
+                from veadk.memory.save_session_callback import (
+                    save_session_to_long_term_memory,
+                )
+
+                if self.after_agent_callback:
+                    if isinstance(self.after_agent_callback, list):
+                        self.after_agent_callback.append(
+                            save_session_to_long_term_memory
+                        )
+                    else:
+                        self.after_agent_callback = [
+                            self.after_agent_callback,
+                            save_session_to_long_term_memory,
+                        ]
+                else:
+                    self.after_agent_callback = save_session_to_long_term_memory
+
+        if self.skills:
+            self.load_skills()
+
+        if self.example_store:
+            from google.adk.tools.example_tool import ExampleTool
+
+            self.tools.append(ExampleTool(examples=self.example_store))
+
+        if self.enable_ghostchar:
+            logger.info("Ghostchar tool enabled")
+            from veadk.tools.ghost_char import GhostcharTool
+
+            self.tools.append(GhostcharTool())
+
+            self.instruction += "Please add a character `< at the beginning of you each text-based response."
+
         logger.info(f"VeADK version: {VERSION}")
 
         logger.info(f"{self.__class__.__name__} `{self.name}` init done.")
         logger.debug(
-            f"Agent: {self.model_dump(include={'name', 'model_name', 'model_api_base', 'tools'})}"
+            f"Agent: {self.model_dump(include={'id', 'name', 'model_name', 'model_api_base', 'tools', 'skills'})}"
         )
 
-    async def _run(
-        self,
-        runner,
-        user_id: str,
-        session_id: str,
-        message: types.Content,
-        stream: bool,
-        run_processor: Optional[BaseRunProcessor] = None,
-    ):
-        """Internal run method with run processor support.
+    def update_model(self, model_name: str):
+        logger.info(f"Updating model to {model_name}")
+        self.model = self.model.model_copy(
+            update={"model": f"{self.model_provider}/{model_name}"}
+        )
 
-        Args:
-            runner: The Runner instance.
-            user_id: User ID for the session.
-            session_id: Session ID.
-            message: The message to send.
-            stream: Whether to stream the output.
-            run_processor: Optional run processor to use. If not provided, uses self.run_processor.
+    def load_skills(self):
+        from pathlib import Path
 
-        Returns:
-            The final output string.
-        """
-        stream_mode = StreamingMode.SSE if stream else StreamingMode.NONE
+        from veadk.skills.skill import Skill
+        from veadk.skills.utils import (
+            load_skills_from_cloud,
+            load_skills_from_directory,
+        )
+        from veadk.tools.skills_tools.skills_toolset import SkillsToolset
 
-        # Use provided run_processor or fall back to instance's run_processor
-        processor = run_processor or self.run_processor
+        skills: Dict[str, Skill] = {}
 
-        @processor.process_run(runner=runner, message=message)
-        async def event_generator():
-            async for event in runner.run_async(
-                user_id=user_id,
-                session_id=session_id,
-                new_message=message,
-                run_config=RunConfig(streaming_mode=stream_mode),
-            ):
-                if event.get_function_calls():
-                    for function_call in event.get_function_calls():
-                        logger.debug(f"Function call: {function_call}")
-                elif (
-                    event.content is not None
-                    and event.content.parts[0].text is not None
-                    and len(event.content.parts[0].text.strip()) > 0
-                ):
-                    yield event.content.parts[0].text
+        for item in self.skills:
+            if not item or str(item).strip() == "":
+                continue
+            path = Path(item)
+            if path.exists() and path.is_dir():
+                for skill in load_skills_from_directory(path):
+                    skills[skill.name] = skill
+            else:
+                for skill in load_skills_from_cloud(item):
+                    skills[skill.name] = skill
+        if skills:
+            self.instruction += "\nYou have the following skills:\n"
 
-        final_output = ""
-        async for chunk in event_generator():
-            if stream:
-                print(chunk, end="", flush=True)
-            final_output += chunk
-        if stream:
-            print()  # end with a new line
+            for skill in skills.values():
+                self.instruction += (
+                    f"- name: {skill.name}\n- description: {skill.description}\n\n"
+                )
 
-        return final_output
+            if self.skills_mode not in [
+                "skills_sandbox",
+                "aio_sandbox",
+                "local",
+            ]:
+                raise ValueError(
+                    f"Unsupported skill mode {self.skills_mode}, use `skills_sandbox`, `aio_sandbox` or `local` instead."
+                )
+
+            if self.skills_mode == "skills_sandbox":
+                self.instruction += (
+                    "You can use the skills by calling the `execute_skills` tool.\n\n"
+                )
+
+            if self.skills_mode == "local":
+                self.instruction += (
+                    "You can use the skills by calling the `skills_tool` tool.\n\n"
+                )
+
+            self.tools.append(SkillsToolset(skills, self.skills_mode))
+        else:
+            logger.warning("No skills loaded.")
 
     def _prepare_tracers(self):
         enable_apmplus_tracer = os.getenv("ENABLE_APMPLUS", "false").lower() == "true"
@@ -274,14 +388,20 @@ class Agent(LlmAgent):
             return
 
         if not self.tracers:
-            from veadk.tracing.telemetry.opentelemetry_tracer import OpentelemetryTracer
+            from veadk.tracing.telemetry.opentelemetry_tracer import (
+                OpentelemetryTracer,
+            )
 
             self.tracers.append(OpentelemetryTracer())
 
         exporters = self.tracers[0].exporters  # type: ignore
 
-        from veadk.tracing.telemetry.exporters.apmplus_exporter import APMPlusExporter
-        from veadk.tracing.telemetry.exporters.cozeloop_exporter import CozeloopExporter
+        from veadk.tracing.telemetry.exporters.apmplus_exporter import (
+            APMPlusExporter,
+        )
+        from veadk.tracing.telemetry.exporters.cozeloop_exporter import (
+            CozeloopExporter,
+        )
         from veadk.tracing.telemetry.exporters.tls_exporter import TLSExporter
 
         if enable_apmplus_tracer and not any(
@@ -304,99 +424,32 @@ class Agent(LlmAgent):
             f"Opentelemetry Tracer init {len(self.tracers[0].exporters)} exporters"  # type: ignore
         )
 
-    async def run(
-        self,
-        prompt: str | list[str],
-        stream: bool = False,
-        app_name: str = "veadk_app",
-        user_id: str = "veadk_user",
-        session_id="veadk_session",
-        load_history_sessions_from_db: bool = False,
-        db_url: str = "",
-        collect_runtime_data: bool = False,
-        eval_set_id: str = "",
-        save_session_to_memory: bool = False,
-        run_processor: Optional[BaseRunProcessor] = None,
-    ):
-        """Running the agent. The runner and session service will be created automatically.
+    @property
+    def _llm_flow(self) -> BaseLlmFlow:
+        from google.adk.flows.llm_flows.auto_flow import AutoFlow
+        from google.adk.flows.llm_flows.single_flow import SingleFlow
 
-        For production, consider using Google-ADK runner to run agent, rather than invoking this method.
+        if (
+            self.disallow_transfer_to_parent
+            and self.disallow_transfer_to_peers
+            and not self.sub_agents
+        ):
+            from veadk.flows.supervise_single_flow import SupervisorSingleFlow
 
-        Args:
-            prompt (str | list[str]): The prompt to run the agent.
-            stream (bool, optional): Whether to stream the output. Defaults to False.
-            app_name (str, optional): The name of the application. Defaults to "veadk_app".
-            user_id (str, optional): The id of the user. Defaults to "veadk_user".
-            session_id (str, optional): The id of the session. Defaults to "veadk_session".
-            load_history_sessions_from_db (bool, optional): Whether to load history sessions from database. Defaults to False.
-            db_url (str, optional): The url of the database. Defaults to "".
-            collect_runtime_data (bool, optional): Whether to collect runtime data. Defaults to False.
-            eval_set_id (str, optional): The id of the eval set. Defaults to "".
-            save_session_to_memory (bool, optional): Whether to save this turn session to memory. Defaults to False.
-            run_processor (Optional[BaseRunProcessor], optional): Optional run processor to use for this run.
-                If not provided, uses the agent's default run_processor. Defaults to None.
-        """
-
-        logger.warning(
-            "Running agent in this function is only for development and testing, do not use this function in production. For production, consider using `Google ADK Runner` to run agent, rather than invoking this method."
-        )
-        logger.info(
-            f"Run agent {self.name}: app_name: {app_name}, user_id: {user_id}, session_id: {session_id}."
-        )
-        prompt = [prompt] if isinstance(prompt, str) else prompt
-
-        # memory service
-        short_term_memory = ShortTermMemory(
-            backend="database" if load_history_sessions_from_db else "local",
-            db_url=db_url,
-        )
-        session_service = short_term_memory.session_service
-        await short_term_memory.create_session(
-            app_name=app_name, user_id=user_id, session_id=session_id
-        )
-
-        # runner
-        runner = Runner(
-            agent=self,
-            app_name=app_name,
-            session_service=session_service,
-            memory_service=self.long_term_memory,
-        )
-
-        logger.info(f"Begin to process prompt {prompt}")
-        # run
-        final_output = ""
-        for _prompt in prompt:
-            message = types.Content(role="user", parts=[types.Part(text=_prompt)])
-            final_output = await self._run(
-                runner, user_id, session_id, message, stream, run_processor
-            )
-
-        # VeADK features
-        if save_session_to_memory:
-            assert self.long_term_memory is not None, (
-                "Long-term memory is not initialized in agent"
-            )
-            session = await session_service.get_session(
-                app_name=app_name,
-                user_id=user_id,
-                session_id=session_id,
-            )
-            if session:
-                await self.long_term_memory.add_session_to_memory(session)
-                logger.info(f"Add session `{session.id}` to your long-term memory.")
+            if self.enable_supervisor:
+                logger.debug(f"Enable supervisor flow for agent: {self.name}")
+                return SupervisorSingleFlow(supervised_agent=self)
             else:
-                logger.error(
-                    f"Session {session_id} not found in session service, cannot save to long-term memory."
-                )
+                return SingleFlow()
+        else:
+            from veadk.flows.supervise_auto_flow import SupervisorAutoFlow
 
-        if collect_runtime_data:
-            eval_set_recorder = EvalSetRecorder(session_service, eval_set_id)
-            dump_path = await eval_set_recorder.dump(app_name, user_id, session_id)
-            self._dump_path = dump_path  # just for test/debug/instrumentation
+            if self.enable_supervisor:
+                logger.debug(f"Enable supervisor flow for agent: {self.name}")
+                return SupervisorAutoFlow(supervised_agent=self)
+            return AutoFlow()
 
-        if self.tracers:
-            for tracer in self.tracers:
-                tracer.dump(user_id=user_id, session_id=session_id)
-
-        return final_output
+    async def run(self, **kwargs):
+        raise NotImplementedError(
+            "Run method in VeADK agent is deprecated since version 0.5.6. Please use runner.run_async instead. Ref: https://agentkit.gitbook.io/docs/runner/overview"
+        )

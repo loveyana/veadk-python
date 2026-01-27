@@ -20,39 +20,54 @@ from pydantic import BaseModel, Field
 
 from veadk.knowledgebase.backends.base_backend import BaseKnowledgebaseBackend
 from veadk.knowledgebase.entry import KnowledgebaseEntry
+from veadk.knowledgebase.types import KnowledgebaseProfile
 from veadk.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
 def _get_backend_cls(backend: str) -> type[BaseKnowledgebaseBackend]:
-    match backend:
-        case "local":
-            from veadk.knowledgebase.backends.in_memory_backend import (
-                InMemoryKnowledgeBackend,
-            )
+    try:
+        match backend:
+            case "local":
+                from veadk.knowledgebase.backends.in_memory_backend import (
+                    InMemoryKnowledgeBackend,
+                )
 
-            return InMemoryKnowledgeBackend
-        case "opensearch":
-            from veadk.knowledgebase.backends.opensearch_backend import (
-                OpensearchKnowledgeBackend,
-            )
+                return InMemoryKnowledgeBackend
+            case "opensearch":
+                from veadk.knowledgebase.backends.opensearch_backend import (
+                    OpensearchKnowledgeBackend,
+                )
 
-            return OpensearchKnowledgeBackend
-        case "viking":
-            from veadk.knowledgebase.backends.vikingdb_knowledge_backend import (
-                VikingDBKnowledgeBackend,
-            )
+                return OpensearchKnowledgeBackend
+            case "redis":
+                from veadk.knowledgebase.backends.redis_backend import (
+                    RedisKnowledgeBackend,
+                )
 
-            return VikingDBKnowledgeBackend
-        case "redis":
-            from veadk.knowledgebase.backends.redis_backend import (
-                RedisKnowledgeBackend,
-            )
+                return RedisKnowledgeBackend
+            case "tos_vector":
+                from veadk.knowledgebase.backends.tos_vector_backend import (
+                    TosVectorKnowledgeBackend,
+                )
 
-            return RedisKnowledgeBackend
+                return TosVectorKnowledgeBackend
+            case "viking":
+                from veadk.knowledgebase.backends.vikingdb_knowledge_backend import (
+                    VikingDBKnowledgeBackend,
+                )
 
-    raise ValueError(f"Unsupported knowledgebase backend: {backend}")
+                return VikingDBKnowledgeBackend
+            case _:
+                raise ValueError(f"Unsupported knowledgebase backend: {backend}")
+    except ImportError as e:
+        if "llama_index" in str(e) or "llama-index" in str(e):
+            raise ImportError(
+                "KnowledgeBase functionality requires 'veadk-python[extensions]'. "
+                "Please install it via `pip install veadk-python[extensions]`."
+            ) from e
+        raise e
 
 
 class KnowledgeBase(BaseModel):
@@ -80,84 +95,6 @@ class KnowledgeBase(BaseModel):
 
     Notes:
         Please ensure that you have set the embedding-related configurations in environment variables.
-
-    Examples:
-        ### Simple backend
-
-        Create a local knowledgebase:
-
-        ```python
-        from veadk import Agent, Runner
-        from veadk.knowledgebase.knowledgebase import KnowledgeBase
-        from veadk.memory.short_term_memory import ShortTermMemory
-
-        app_name = "veadk_playground_app"
-        user_id = "veadk_playground_user"
-        session_id = "veadk_playground_session"
-
-
-        knowledgebase = KnowledgeBase(backend="opensearch", app_name=app_name)
-        knowledgebase.add_from_files(files=[knowledgebase_file])
-
-        agent = Agent(knowledgebase=knowledgebase)
-
-        runner = Runner(
-            agent=agent,
-            short_term_memory=ShortTermMemory(),
-            app_name=app_name,
-            user_id=user_id,
-        )
-
-        response = await runner.run(
-            messages="Tell me the secret of green.", session_id=session_id
-        )
-        print(response)
-        ```
-
-        ### Initialize knowledgebase with metadata
-
-        ```python
-        from veadk.knowledgebase import KnowledgeBase
-
-        knowledgebase = KnowledgeBase(
-            name="user_data",
-            description="A knowledgebase contains user hobbies.",
-            index="my_app",
-        )
-        ```
-
-        ### Initialize knowledgebase with backend instance
-
-        ```python
-        import veadk.config  # noqa
-
-        from veadk.knowledgebase import KnowledgeBase
-        from veadk.knowledgebase.backends.in_memory_backend import InMemoryKnowledgeBackend
-
-        backend = InMemoryKnowledgeBackend(
-            index="my_app",
-            embedding_config=...,
-        )
-
-        knowledgebase = KnowledgeBase(
-            name="user_data",
-            description="A knowledgebase contains user hobbies.",
-            backend=backend,
-        )
-        ```
-
-        ### Initialize knowledgebase with backend config
-
-        ```python
-        from veadk.knowledgebase import KnowledgeBase
-
-        knowledgebase = KnowledgeBase(
-            name="user_data",
-            description="A knowledgebase contains user hobbies.",
-            backend="local",
-            backend_config={"index": "user_app"},
-        )
-        ```
     """
 
     name: str = "user_knowledgebase"
@@ -165,7 +102,8 @@ class KnowledgeBase(BaseModel):
     description: str = "This knowledgebase stores some user-related information."
 
     backend: Union[
-        Literal["local", "opensearch", "viking", "redis"], BaseKnowledgebaseBackend
+        Literal["local", "opensearch", "viking", "redis", "tos_vector"],
+        BaseKnowledgebaseBackend,
     ] = "local"
 
     backend_config: dict = Field(default_factory=dict)
@@ -175,6 +113,10 @@ class KnowledgeBase(BaseModel):
     app_name: str = ""
 
     index: str = ""
+
+    enable_profile: bool = False
+
+    query_with_user_profile: bool = False
 
     def model_post_init(self, __context: Any) -> None:
         if isinstance(self.backend, BaseKnowledgebaseBackend):
@@ -201,6 +143,11 @@ class KnowledgeBase(BaseModel):
         logger.info(
             f"Initialized knowledgebase with backend {self._backend.__class__.__name__}"
         )
+
+        if self.query_with_user_profile:
+            logger.info(
+                "Enable user profile querying for knowledgebase. You *must* use Viking Memory backend to enjoy this feature."
+            )
 
     def add_from_directory(self, directory: str, **kwargs) -> bool:
         """Add knowledge from file path to knowledgebase.
@@ -305,3 +252,65 @@ class KnowledgeBase(BaseModel):
         For example, knowledgebase.delete(...) -> self._backend.delete(...)
         """
         return getattr(self._backend, name)
+
+    async def generate_profiles(self, files: list[str], profile_path: str = ""):
+        """Generate knowledgebase profiles.
+
+        Args:
+            files (list[str]): The list of files.
+            name (str): The name of the knowledgebase.
+            profile_path (str, optional): The path to store the generated profiles. If empty, the profiles will be stored in a default path.
+
+        Returns:
+            list[KnowledgebaseProfile]: A list of knowledgebase profiles.
+        """
+        import json
+        from pathlib import Path
+
+        from veadk import Agent, Runner
+        from veadk.utils.misc import write_string_to_file
+
+        file_contents = [Path(file).read_text() for file in files]
+
+        agent = Agent(
+            name="profile_generator",
+            model_name="deepseek-v3-2-251201",
+            # model_extra_config={
+            #     "extra_body": {"thinking": {"type": "disabled"}},
+            # },
+            description="A generator for generating knowledgebase profiles for the given files.",
+            instruction='Generate JSON-formatted profile for the given file content. The corresponding language should be consistent with the file content. Respond ONLY with a JSON object containing the capitalized fields. Format: {"name": "", "description": "", "tags": [], "keywords": []} (3-5 tags, 3-5 keywords)',
+            output_schema=KnowledgebaseProfile,
+        )
+        runner = Runner(agent=agent)
+
+        profiles = []
+        for idx, file_content in enumerate(file_contents):
+            response = await runner.run(
+                messages="file content: " + file_content,
+                session_id=f"profile_{idx}",
+            )
+            try:
+                profiles.append(KnowledgebaseProfile(**json.loads(response)))
+            except json.JSONDecodeError:
+                logger.error(
+                    f"Failed to parse JSON response for file {files[idx]}: {response}. Skip for this file."
+                )
+                continue
+
+        logger.debug(f"Generated {len(profiles)} profiles: {profiles}.")
+
+        for idx, profile in enumerate(profiles):
+            if not profile_path:
+                profile_path = f"./profiles/knowledgebase/profiles_{self.index}"
+            write_string_to_file(
+                profile_path + f"/profile_{profile.name}.json",
+                json.dumps(profile.model_dump(), indent=4, ensure_ascii=False),
+            )
+
+        profile_names = [profile.name for profile in profiles]
+
+        write_string_to_file(
+            profile_path + "/profile_list.json",
+            json.dumps(profile_names, indent=4, ensure_ascii=False),
+        )

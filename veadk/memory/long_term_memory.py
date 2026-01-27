@@ -37,39 +37,47 @@ logger = get_logger(__name__)
 
 
 def _get_backend_cls(backend: str) -> type[BaseLongTermMemoryBackend]:
-    match backend:
-        case "local":
-            from veadk.memory.long_term_memory_backends.in_memory_backend import (
-                InMemoryLTMBackend,
-            )
+    try:
+        match backend:
+            case "local":
+                from veadk.memory.long_term_memory_backends.in_memory_backend import (
+                    InMemoryLTMBackend,
+                )
 
-            return InMemoryLTMBackend
-        case "opensearch":
-            from veadk.memory.long_term_memory_backends.opensearch_backend import (
-                OpensearchLTMBackend,
-            )
+                return InMemoryLTMBackend
+            case "opensearch":
+                from veadk.memory.long_term_memory_backends.opensearch_backend import (
+                    OpensearchLTMBackend,
+                )
 
-            return OpensearchLTMBackend
-        case "viking":
-            from veadk.memory.long_term_memory_backends.vikingdb_memory_backend import (
-                VikingDBLTMBackend,
-            )
+                return OpensearchLTMBackend
+            case "viking":
+                from veadk.memory.long_term_memory_backends.vikingdb_memory_backend import (
+                    VikingDBLTMBackend,
+                )
 
-            return VikingDBLTMBackend
-        case "redis":
-            from veadk.memory.long_term_memory_backends.redis_backend import (
-                RedisLTMBackend,
-            )
+                return VikingDBLTMBackend
+            case "redis":
+                from veadk.memory.long_term_memory_backends.redis_backend import (
+                    RedisLTMBackend,
+                )
 
-            return RedisLTMBackend
-        case "mem0":
-            from veadk.memory.long_term_memory_backends.mem0_backend import (
-                Mem0LTMBackend,
-            )
+                return RedisLTMBackend
+            case "mem0":
+                from veadk.memory.long_term_memory_backends.mem0_backend import (
+                    Mem0LTMBackend,
+                )
 
-            return Mem0LTMBackend
-
-    raise ValueError(f"Unsupported long term memory backend: {backend}")
+                return Mem0LTMBackend
+            case _:
+                raise ValueError(f"Unsupported long term memory backend: {backend}")
+    except ImportError as e:
+        if "llama_index" in str(e) or "llama-index" in str(e):
+            raise ImportError(
+                "LongTermMemory functionality requires 'veadk-python[extensions]'. "
+                "Please install it via `pip install veadk-python[extensions]`."
+            ) from e
+        raise e
 
 
 class LongTermMemory(BaseMemoryService, BaseModel):
@@ -100,68 +108,6 @@ class LongTermMemory(BaseMemoryService, BaseModel):
 
     Notes:
         Please ensure that you have set the embedding-related configurations in environment variables.
-
-    Examples:
-        ### Simple long-term memory
-
-        Once create a long-term memory withou any arguments, all configurations are come from **environment variables**.
-
-        ```python
-        import asyncio
-
-        from veadk import Agent, Runner
-        from veadk.memory.long_term_memory import LongTermMemory
-        from veadk.memory.short_term_memory import ShortTermMemory
-
-        app_name = "veadk_playground_app"
-        user_id = "veadk_playground_user"
-
-        long_term_memory = LongTermMemory(backend="local", app_name=app_name)
-
-        agent = Agent(long_term_memory=long_term_memory)
-
-        runner = Runner(
-            agent=agent,
-            app_name=app_name,
-            user_id=user_id,
-            short_term_memory=ShortTermMemory(),
-        )
-
-        # ===== add memory =====
-        session_id = "veadk_playground_session"
-        teaching_prompt = "I brought an ice-cream last week."
-
-        asyncio.run(runner.run(messages=teaching_prompt, session_id=session_id))
-        asyncio.run(
-            runner.save_session_to_long_term_memory(session_id=session_id)
-        )  # save session to long-term memory
-
-
-        # ===== check memory =====
-        session_id = "veadk_playground_session_2"  # use a new session
-        student_prompt = "What I brought last week?"
-
-        response = asyncio.run(runner.run(messages=student_prompt, session_id=session_id))
-
-        print(response)
-        ```
-
-        ### Create with a backend instance
-
-        ```python
-        from veadk.memory.long_term_memory import LongTermMemory
-        from veadk.memory.long_term_memory.backends import LongTermMemory
-
-        long_term_memory = LongTermMemory(backend=...)
-        ```
-
-        ### Create with backend configurations
-
-        ```python
-        from veadk.memory.long_term_memory import LongTermMemory
-
-        long_term_memory = LongTermMemory(backend="", backend_config={})
-        ```
     """
 
     backend: Union[
@@ -313,20 +259,6 @@ class LongTermMemory(BaseMemoryService, BaseModel):
             SearchMemoryResponse:
                 An object containing a list of `MemoryEntry` items representing
                 the retrieved memory snippets relevant to the query.
-
-        Examples:
-            ```python
-            response = await memory_service.search_memory(
-                app_name="chat_app",
-                user_id="user_123",
-                query="favorite programming language"
-            )
-
-            for memory in response.memories:
-                print(memory.content.parts[0].text)
-            # Output:
-            # User likes Python and TypeScript for backend development.
-            ```
         """
         logger.info(f"Search memory with query={query}")
 
@@ -369,3 +301,13 @@ class LongTermMemory(BaseMemoryService, BaseModel):
             f"Return {len(memory_events)} memory events for query: {query} index={self.index} user_id={user_id}"
         )
         return SearchMemoryResponse(memories=memory_events)
+
+    def get_user_profile(self, user_id: str) -> str:
+        logger.info(f"Get user profile for user_id={user_id}")
+        if self.backend == "viking":
+            return self._backend.get_user_profile(user_id=user_id)  # type: ignore
+        else:
+            logger.error(
+                f"Long term memory backend {self.backend} does not support get user profile. Return empty string."
+            )
+            return ""

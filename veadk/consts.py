@@ -13,13 +13,13 @@
 # limitations under the License.
 
 import time
-
+import os
 from veadk.utils.misc import getenv
 from veadk.version import VERSION
 
 DEFAULT_AGENT_NAME = "veAgent"
 
-DEFAULT_MODEL_AGENT_NAME = "doubao-seed-1-6-251015"
+DEFAULT_MODEL_AGENT_NAME = "doubao-seed-1-8-251228"
 DEFAULT_MODEL_AGENT_PROVIDER = "openai"
 DEFAULT_MODEL_AGENT_API_BASE = "https://ark.cn-beijing.volces.com/api/v3/"
 DEFAULT_MODEL_EXTRA_CONFIG = {
@@ -58,17 +58,37 @@ DEFAULT_CR_REPO_NAME = "veadk-user-repo"
 DEFAULT_TLS_LOG_PROJECT_NAME = "veadk-logs"
 DEFAULT_TLS_TRACING_INSTANCE_NAME = "veadk-tracing"
 
-DEFAULT_TOS_BUCKET_NAME = "ark-tutorial"
+DEFAULT_TOS_BUCKET_NAME = "veadk-default-bucket"
 
 DEFAULT_COZELOOP_SPACE_NAME = "VeADK Space"
 
 DEFAULT_IMAGE_EDIT_MODEL_NAME = "doubao-seededit-3-0-i2i-250628"
 DEFAULT_IMAGE_EDIT_MODEL_API_BASE = "https://ark.cn-beijing.volces.com/api/v3/"
 
-DEFAULT_VIDEO_MODEL_NAME = "doubao-seedance-1-0-pro-250528"
+DEFAULT_VIDEO_MODEL_NAME = "doubao-seedance-1-5-pro-251215"
 DEFAULT_VIDEO_MODEL_API_BASE = "https://ark.cn-beijing.volces.com/api/v3/"
 
 DEFAULT_IMAGE_GENERATE_MODEL_NAME = "doubao-seedream-4-5-251128"
 DEFAULT_IMAGE_GENERATE_MODEL_API_BASE = "https://ark.cn-beijing.volces.com/api/v3/"
 
 VEFAAS_IAM_CRIDENTIAL_PATH = "/var/run/secrets/iam/credential"
+
+DEFAULT_NACOS_GROUP = "VEADK_GROUP"
+DEFAULT_NACOS_INSTANCE_NAME = "veadk"
+
+provider = os.getenv("CLOUD_PROVIDER")
+
+if provider and provider.lower() == "byteplus":
+    DEFAULT_MODEL_AGENT_NAME = "seed-1-6-250915"
+    DEFAULT_MODEL_AGENT_API_BASE = "https://ark.ap-southeast.bytepluses.com/api/v3"
+    DEFAULT_IMAGE_EDIT_MODEL_NAME = "seededit-3-0-i2i-250628"
+    DEFAULT_IMAGE_EDIT_MODEL_API_BASE = "https://ark.ap-southeast.bytepluses.com/api/v3"
+    DEFAULT_VIDEO_MODEL_NAME = "seedance-1-5-pro-251215"
+    DEFAULT_VIDEO_MODEL_API_BASE = "https://ark.ap-southeast.bytepluses.com/api/v3"
+    DEFAULT_IMAGE_GENERATE_MODEL_NAME = "seedream-4-5-251128"
+    DEFAULT_IMAGE_GENERATE_MODEL_API_BASE = (
+        "https://ark.ap-southeast.bytepluses.com/api/v3"
+    )
+DEFAULT_MODEL_EMBEDDING_NAME = "doubao-embedding-vision-250615"
+DEFAULT_MODEL_EMBEDDING_API_BASE = "https://ark.cn-beijing.volces.com/api/v3/"
+DEFAULT_MODEL_EMBEDDING_DIM = 2048
