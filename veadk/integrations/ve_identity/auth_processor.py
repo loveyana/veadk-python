@@ -156,6 +156,82 @@ class _DefaultOauth2AuthPoller(OAuth2AuthPoller):
         )
 
 
+class McpElicitationPoller(OAuth2AuthPoller):
+    """Poller for MCP URL elicitation flow (-32042 error handling).
+
+    This poller is used when MCP server returns -32042 error requiring user
+    authorization. Unlike OAuth2 flow where we poll identity service for tokens,
+    MCP elicitation simply waits for user to complete authorization via the URL.
+
+    Flow:
+    1. MCP server returns -32042 with auth URL
+    2. VeIdentityMcpTool triggers adk_request_credential
+    3. AuthRequestProcessor calls on_auth_url callback, then uses this poller
+    4. This poller waits for user to complete authorization (or timeout)
+    5. Returns dummy OAuth2Auth to signal completion
+    6. ADK retries the tool call with the same inbound token
+    7. MCP server should now succeed (user has authorized)
+
+    The poller can be notified early via mark_authorized() if the system
+    receives a callback indicating user completed authorization.
+    """
+
+    def __init__(
+        self,
+        auth_url: str,
+        elicitation_id: str = "",
+        timeout_seconds: int = DEFAULT_POLLING_TIMEOUT_SECONDS,
+        poll_interval_seconds: int = DEFAULT_POLLING_INTERVAL_SECONDS,
+    ):
+        """Initialize the MCP elicitation poller.
+
+        Args:
+            auth_url: The authorization URL (for logging purposes).
+            elicitation_id: The unique elicitation ID from MCP server.
+            timeout_seconds: Max time to wait for user authorization (default: 600s).
+            poll_interval_seconds: Interval between checks (default: 5s).
+        """
+        self.auth_url = auth_url
+        self.elicitation_id = elicitation_id
+        self.timeout_seconds = timeout_seconds
+        self.poll_interval_seconds = poll_interval_seconds
+        self._authorized = False
+
+    def mark_authorized(self) -> None:
+        """Mark the elicitation as authorized.
+
+        Call this when receiving notification that user completed authorization
+        (e.g., via webhook callback). This will cause poll_for_auth() to return
+        immediately instead of waiting for timeout.
+        """
+        self._authorized = True
+
+    async def poll_for_auth(self) -> OAuth2Auth:
+        """Wait for user to complete MCP elicitation authorization.
+
+        This method waits for either:
+        1. mark_authorized() to be called (early completion)
+        2. Timeout to be reached (assumes user completed authorization)
+
+        Returns:
+            A dummy OAuth2Auth indicating waiting is complete.
+            The actual authorization status is determined by the next tool call.
+        """
+        logger.info(f"MCP elicitation [{self.elicitation_id}]: Waiting for user authorization")
+
+        start_time = time.time()
+
+        while time.time() - start_time < self.timeout_seconds:
+            if self._authorized:
+                logger.info(f"MCP elicitation [{self.elicitation_id}]: Authorization confirmed")
+                return OAuth2Auth(access_token="mcp_elicitation_complete")
+
+            await asyncio.sleep(self.poll_interval_seconds)
+
+        logger.info(f"MCP elicitation [{self.elicitation_id}]: Timeout, proceeding to retry")
+        return OAuth2Auth(access_token="mcp_elicitation_timeout")
+
+
 class AuthRequestProcessor(BaseRunProcessor):
     """Processor for handling authentication requests in agent conversations.
 
@@ -220,11 +296,21 @@ class AuthRequestProcessor(BaseRunProcessor):
             else:
                 on_auth_url(auth_uri)
 
-        # Use custom poller or default poller
-        active_poller = (
-            self.config.oauth2_auth_poller(auth_uri, request_dict)
-            if self.config.oauth2_auth_poller
-            else _DefaultOauth2AuthPoller(
+        # Select poller based on request type
+        # MCP elicitation uses McpElicitationPoller (wait for user to complete auth via URL)
+        # OAuth2 uses _DefaultOauth2AuthPoller (poll identity service for token)
+        if request_dict.get("type") == "mcp_elicitation":
+            # MCP elicitation: wait for user to complete authorization
+            active_poller = McpElicitationPoller(
+                auth_url=auth_uri,
+                elicitation_id=request_dict.get("elicitation_id", ""),
+            )
+        elif self.config.oauth2_auth_poller:
+            # Custom poller provided
+            active_poller = self.config.oauth2_auth_poller(auth_uri, request_dict)
+        else:
+            # Default OAuth2 poller: poll identity service for token
+            active_poller = _DefaultOauth2AuthPoller(
                 auth_uri,
                 lambda: (
                     lambda response: (
@@ -234,7 +320,6 @@ class AuthRequestProcessor(BaseRunProcessor):
                     )
                 )(self._identity_client.get_oauth2_token_or_auth_url(**request_dict)),
             )
-        )
 
         # Poll for the oauth2 auth
         updated_oauth2_auth = await active_poller.poll_for_auth()

@@ -47,6 +47,7 @@ from veadk.integrations.ve_identity.auth_processor import (
     AuthRequestConfig,
     AuthRequestProcessor,
     MockOauth2AuthPoller,
+    McpElicitationPoller,
     get_function_call_auth_config,
     get_function_call_id,
     is_pending_auth_event,
@@ -57,9 +58,11 @@ from veadk.integrations.ve_identity.auth_config import (
     api_key_auth,
     oauth2_auth,
     workload_auth,
+    inbound_auth,
     ApiKeyAuthConfig,
     OAuth2AuthConfig,
     WorkloadAuthConfig,
+    InboundAuthConfig,
     VeIdentityAuthConfig,
     get_default_identity_client,
 )
@@ -90,9 +93,11 @@ __all__ = [
     "api_key_auth",
     "oauth2_auth",
     "workload_auth",
+    "inbound_auth",
     "ApiKeyAuthConfig",
     "OAuth2AuthConfig",
     "WorkloadAuthConfig",
+    "InboundAuthConfig",
     "VeIdentityAuthConfig",
     # Auth processor
     "AuthRequestProcessor",
@@ -105,6 +110,7 @@ __all__ = [
     "WorkloadToken",
     "OAuth2AuthPoller",
     "MockOauth2AuthPoller",
+    "McpElicitationPoller",
     # Utils
     "get_default_identity_client",
 ]

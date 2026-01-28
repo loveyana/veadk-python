@@ -165,8 +165,52 @@ class WorkloadAuthConfig(AuthConfig):
         return "workload"
 
 
+class InboundAuthConfig(AuthConfig):
+    """Inbound token passthrough authentication configuration.
+
+    This config extracts a token from the incoming request (via credential_service)
+    and passes it through to downstream MCP servers. When MCP server returns -32042
+    elicitation error (requiring user authorization), it triggers the ADK credential
+    request flow automatically via AuthRequestProcessor.
+
+    Flow:
+    1. Extract inbound token from request via credential_service
+    2. Pass token to MCP server in Authorization header
+    3. If MCP returns -32042, VeIdentityMcpTool triggers adk_request_credential
+    4. AuthRequestProcessor uses McpElicitationPoller to wait for user authorization
+    5. After user completes authorization, ADK retries the tool call
+    6. MCP server should now succeed (user has authorized)
+
+    Attributes:
+        credential_key: Key to identify the credential in credential_service.
+        auth_method: How the token is passed ("header" or "bearer").
+        header_scheme: The HTTP auth scheme (e.g., "bearer").
+
+    Examples:
+        ```python
+        from veadk.integrations.ve_identity import inbound_auth, VeIdentityMcpToolset
+
+        toolset = VeIdentityMcpToolset(
+            auth_config=inbound_auth(credential_key="my_token"),
+            connection_params=StreamableHTTPConnectionParams(url="..."),
+        )
+        ```
+    """
+
+    provider_name: str = "passthrough" # Fixed provider name for inbound auth
+    credential_key: str = "inbound_auth"
+    auth_method: Literal["header", "bearer"] = "header"
+    header_scheme: Optional[str] = "bearer"
+
+    @property
+    def auth_type(self) -> str:
+        return "inbound"
+
+
 # Type alias for all auth configs
-VeIdentityAuthConfig = Union[ApiKeyAuthConfig, OAuth2AuthConfig, WorkloadAuthConfig]
+VeIdentityAuthConfig = Union[
+    ApiKeyAuthConfig, OAuth2AuthConfig, WorkloadAuthConfig, InboundAuthConfig
+]
 
 
 # Convenience factory functions
@@ -258,4 +302,50 @@ def oauth2_auth(
         oauth2_auth_poller=oauth2_auth_poller,
         identity_client=identity_client,
         region=region,
+    )
+
+
+def inbound_auth(
+    credential_key: str = "inbound_auth",
+    auth_method: Literal["header", "bearer"] = "header",
+    header_scheme: Optional[str] = "bearer",
+) -> InboundAuthConfig:
+    """Create an inbound token passthrough authentication configuration.
+
+    This configuration extracts tokens from incoming requests via credential_service
+    and passes them through to downstream MCP servers. When MCP server returns -32042
+    elicitation error (requiring user authorization), the flow is:
+
+    1. VeIdentityMcpTool triggers adk_request_credential with the auth URL
+    2. AuthRequestProcessor uses McpElicitationPoller to wait for user authorization
+    3. After user completes authorization, ADK retries the tool call
+    4. MCP server should now succeed (user has authorized)
+
+    Args:
+        credential_key: Key to identify the credential in credential_service.
+        auth_method: How the token is passed ("header" or "bearer").
+        header_scheme: The HTTP auth scheme (e.g., "bearer").
+
+    Returns:
+        InboundAuthConfig instance.
+
+    Examples:
+        ```python
+        # Basic usage with VeIdentityMcpToolset
+        from veadk.integrations.ve_identity import inbound_auth, VeIdentityMcpToolset
+
+        toolset = VeIdentityMcpToolset(
+            auth_config=inbound_auth(),
+            connection_params=StreamableHTTPConnectionParams(url="..."),
+        )
+
+        # Custom credential key
+        config = inbound_auth(credential_key="my_token")
+        ```
+    """
+    return InboundAuthConfig(
+        provider_name="passthrough",
+        credential_key=credential_key,
+        auth_method=auth_method,
+        header_scheme=header_scheme,
     )

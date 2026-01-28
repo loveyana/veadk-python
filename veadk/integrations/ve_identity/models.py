@@ -226,3 +226,63 @@ class AssumeRoleCredential(BaseModel):
     access_key_id: str
     secret_access_key: str
     session_token: str
+
+
+class McpElicitation(BaseModel):
+    """Single MCP elicitation entry from -32042 error.
+
+    Attributes:
+        url: The authorization URL for user to complete authorization.
+        elicitationId: Unique identifier for this elicitation request.
+        message: Optional message to display to user.
+        mode: Elicitation mode (typically "url").
+    """
+
+    url: str = ""
+    elicitationId: str = ""
+    message: str = ""
+    mode: str = "url"
+
+    @classmethod
+    def from_any(cls, data: Any) -> "McpElicitation":
+        """Create McpElicitation from dict or object."""
+        if isinstance(data, dict):
+            return cls(**{k: v for k, v in data.items() if k in cls.model_fields})
+        elif isinstance(data, cls):
+            return data
+        else:
+            # Handle object with attributes
+            return cls(
+                url=getattr(data, "url", ""),
+                elicitationId=getattr(data, "elicitationId", ""),
+                message=getattr(data, "message", ""),
+                mode=getattr(data, "mode", "url"),
+            )
+
+
+class McpElicitationData(BaseModel):
+    """MCP -32042 error data containing elicitations.
+
+    Attributes:
+        elicitations: List of elicitation entries.
+    """
+
+    elicitations: List[McpElicitation] = []
+
+    @classmethod
+    def from_any(cls, data: Any) -> "McpElicitationData":
+        """Create McpElicitationData from dict or object."""
+        if data is None:
+            return cls()
+
+        if isinstance(data, dict):
+            raw_elicitations = data.get("elicitations", [])
+        else:
+            raw_elicitations = getattr(data, "elicitations", [])
+
+        elicitations = [McpElicitation.from_any(e) for e in raw_elicitations]
+        return cls(elicitations=elicitations)
+
+    def get_first(self) -> Optional[McpElicitation]:
+        """Get the first elicitation, or None if empty."""
+        return self.elicitations[0] if self.elicitations else None

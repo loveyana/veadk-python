@@ -14,12 +14,20 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from typing_extensions import override
 
 from mcp.types import Tool as McpBaseTool
+from mcp.shared.exceptions import McpError
 from google.genai.types import FunctionDeclaration
-from google.adk.auth.auth_credential import AuthCredential
+from google.adk.auth import AuthConfig
+from google.adk.auth.auth_credential import (
+    AuthCredential,
+    AuthCredentialTypes,
+    OAuth2Auth,
+)
+from google.adk.auth.auth_schemes import OAuth2
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 from google.adk.tools._gemini_schema_util import _to_gemini_schema
@@ -30,10 +38,14 @@ from veadk.integrations.ve_identity.auth_mixins import (
     VeIdentityAuthMixin,
     AuthRequiredException,
 )
+from veadk.integrations.ve_identity.models import McpElicitationData
 from veadk.integrations.ve_identity.utils import generate_headers, retry_on_errors
 from veadk.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# MCP JSON-RPC error code for URL elicitation required
+MCP_URL_ELICITATION_REQUIRED = -32042
 
 
 class VeIdentityMcpTool(VeIdentityAuthMixin, BaseTool):
@@ -169,12 +181,73 @@ class VeIdentityMcpTool(VeIdentityAuthMixin, BaseTool):
 
         Returns:
             Any: The response from the tool.
-        """
-        # Extract headers from credential for session pooling
-        headers = generate_headers(credential)
 
-        # Get the session from the session manager
+        Raises:
+            AuthRequiredException: When MCP server returns -32042 and elicitation
+                handling is enabled.
+        """
+        headers = generate_headers(credential)
         session = await self._mcp_session_manager.create_session(headers=headers)
 
-        response = await session.call_tool(self._mcp_tool.name, arguments=args)
-        return response
+        try:
+            return await session.call_tool(self._mcp_tool.name, arguments=args)
+        except McpError as e:
+            if getattr(getattr(e, "error", None), "code", None) == MCP_URL_ELICITATION_REQUIRED:
+                self._handle_mcp_elicitation(e, tool_context)
+            raise
+
+    def _handle_mcp_elicitation(
+        self,
+        error: McpError,
+        tool_context: ToolContext,
+    ) -> None:
+        """Handle MCP -32042 URL elicitation error.
+
+        Extracts elicitation data, constructs AuthConfig, and triggers ADK credential
+        request flow.
+
+        Args:
+            error: The McpError with code -32042.
+            tool_context: The tool context.
+
+        Raises:
+            AuthRequiredException: Always raised to trigger auth flow.
+        """
+        # Parse elicitation data using model
+        elicitation_data = McpElicitationData.from_any(getattr(error.error, "data", None))
+        elicitation = elicitation_data.get_first()
+
+        if not elicitation or not elicitation.url:
+            logger.warning("No valid elicitation URL in MCP -32042 error")
+            raise error
+
+        logger.info(f"MCP server requires authorization: {elicitation.message or 'Authorization required'}")
+
+        # Construct elicitation context (type is used by AuthRequestProcessor to select poller)
+        elicitation_context = {
+            "type": "mcp_elicitation",
+            "elicitation_id": elicitation.elicitationId,
+        }
+
+        # Construct AuthConfig and trigger credential request
+        auth_config = AuthConfig(
+            auth_scheme=OAuth2(
+                flows={
+                    "authorizationCode": {
+                        "authorizationUrl": elicitation.url,
+                        "tokenUrl": "",
+                        "scopes": {},
+                    }
+                }
+            ),
+            raw_auth_credential=AuthCredential(
+                auth_type=AuthCredentialTypes.OAUTH2,
+                oauth2=OAuth2Auth(auth_uri=elicitation.url),
+                resource_ref=json.dumps(elicitation_context),
+            ),
+        )
+
+        tool_context.request_credential(auth_config=auth_config)
+        raise AuthRequiredException(
+            elicitation.message or "MCP Server requires user authorization."
+        )

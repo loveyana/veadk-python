@@ -44,6 +44,7 @@ from veadk.integrations.ve_identity.auth_config import (
     ApiKeyAuthConfig,
     OAuth2AuthConfig,
     WorkloadAuthConfig,
+    InboundAuthConfig,
     get_default_identity_client,
 )
 from veadk.integrations.ve_identity.token_manager import get_workload_token
@@ -557,6 +558,105 @@ class OAuth2AuthMixin(BaseAuthMixin):
         )
 
 
+class InboundAuthMixin(BaseAuthMixin):
+    """Mixin for inbound token passthrough authentication.
+
+    This mixin extracts tokens from incoming requests via credential_service
+    and passes them through to downstream MCP servers. When MCP server returns
+    -32042 elicitation error (requiring user authorization), it triggers the
+    ADK credential request flow automatically.
+
+    Flow:
+    1. Extract inbound token from request via credential_service
+    2. Pass token to MCP server in Authorization header
+    3. If MCP returns -32042, trigger adk_request_credential flow
+    4. AuthRequestProcessor waits for user to complete authorization
+    5. ADK retries the tool call with the same inbound token
+    6. MCP server should now succeed (user has authorized)
+
+    Note: This mixin only supports ToolContext, not ReadonlyContext.
+    """
+
+    def __init__(
+        self,
+        *,
+        credential_key: str = "inbound_auth",
+        auth_method: str = "header",
+        header_scheme: Optional[str] = "bearer",
+        **kwargs,
+    ):
+        """Initialize the inbound authentication mixin.
+
+        Args:
+            credential_key: Key to identify the credential in credential_service.
+            auth_method: How the token is passed ("header" or "bearer").
+            header_scheme: The HTTP auth scheme (e.g., "bearer").
+            **kwargs: Additional arguments passed to parent classes.
+        """
+        super().__init__(**kwargs)
+        self._credential_key = credential_key
+        self._auth_method = auth_method
+        self._header_scheme = header_scheme
+
+    async def _get_credential(self, *, tool_context: ToolContext) -> AuthCredential:
+        """Get credential from the incoming request via credential_service.
+
+        Args:
+            tool_context: The tool context for accessing credential_service.
+
+        Returns:
+            The authentication credential extracted from the incoming request,
+            or empty credential if not available.
+        """
+        from veadk.utils.auth import build_auth_config
+
+        # Build auth config for extracting inbound token
+        auth_config = build_auth_config(
+            credential_key=self._credential_key,
+            auth_method=self._auth_method,
+            header_scheme=self._header_scheme,
+        )
+
+        # Load credential from credential service
+        credential = await tool_context.load_credential(
+            auth_config=auth_config,
+        )
+
+        if credential:
+            logger.debug(f"Loaded inbound credential for key={self._credential_key}")
+            return credential
+
+        logger.debug(
+            f"No inbound credential found for key={self._credential_key}, "
+            "proceeding without credential"
+        )
+        return AuthCredential(auth_type=AuthCredentialTypes.OAUTH2, oauth2=None)
+
+    async def _execute_with_credential(
+        self,
+        *,
+        args: dict[str, Any],
+        tool_context: ToolContext,
+        credential: AuthCredential,
+    ) -> Any:
+        """Default implementation - should be overridden by concrete tool classes.
+
+        Args:
+            args: Arguments to pass to the tool.
+            tool_context: The tool context.
+            credential: The authentication credential.
+
+        Returns:
+            The result from the tool execution.
+
+        Raises:
+            NotImplementedError: Always, as this should be overridden.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} must override _execute_with_credential method"
+        )
+
+
 class VeIdentityAuthMixin(BaseAuthMixin):
     """Unified mixin that supports both API Key and OAuth2 authentication based on configuration.
 
@@ -611,6 +711,13 @@ class VeIdentityAuthMixin(BaseAuthMixin):
                 oauth2_auth_poller=self._auth_config.oauth2_auth_poller,
                 identity_client=self._auth_config.identity_client,
                 region=self._auth_config.region,
+                **kwargs,
+            )
+        elif isinstance(self._auth_config, InboundAuthConfig):
+            return InboundAuthMixin(
+                credential_key=self._auth_config.credential_key,
+                auth_method=self._auth_config.auth_method,
+                header_scheme=self._auth_config.header_scheme,
                 **kwargs,
             )
         else:
