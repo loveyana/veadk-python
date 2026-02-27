@@ -16,8 +16,8 @@
 The document of this tool see: https://www.volcengine.com/docs/85508/1650263
 """
 
+import asyncio
 import os
-import requests
 
 from google.adk.tools import ToolContext
 
@@ -28,14 +28,45 @@ from veadk.utils.volcengine_sign import ve_request
 logger = get_logger(__name__)
 
 
-def web_search(query: str, tool_context: ToolContext | None = None) -> list[str]:
-    """Search a query in websites.
+def do_search(query: str, ak: str, sk: str, session_token: str) -> list[str]:
+    response = ve_request(
+        request_body={
+            "Query": query,
+            "SearchType": "web",
+            "Count": 5,
+            "NeedSummary": True,
+        },
+        action="WebSearch",
+        ak=ak,
+        sk=sk,
+        service="volc_torchlight_api",
+        version="2025-01-01",
+        region="cn-beijing",
+        host="mercury.volcengineapi.com",
+        header={"X-Security-Token": session_token},
+    )
+
+    try:
+        results: list = response["Result"]["WebResults"]
+        final_results = []
+        for result in results:
+            final_results.append(result["Summary"].strip())
+        return final_results
+    except Exception as e:
+        logger.error(f"Web search failed {e}, response body: {response}")
+        return [response]
+
+
+async def parallel_web_search(
+    queries: list[str], tool_context: ToolContext | None = None
+) -> dict[str, list[str]]:
+    """Search queries from websites in parallel.
 
     Args:
-        query: The query to search.
+        queries: The queries to search. Each query will be searched in parallel.
 
     Returns:
-        A list of result documents.
+        A dict of query to result documents.
     """
     ak = None
     sk = None
@@ -64,55 +95,17 @@ def web_search(query: str, tool_context: ToolContext | None = None) -> list[str]
     else:
         logger.debug("Successfully get AK/SK from tool context.")
 
-    provider = (os.getenv("CLOUD_PROVIDER") or "").lower()
-    logger.info(f"Cloud provider: {provider}")
+    results = {}
 
-    if provider == "byteplus":
-        request_body = {
-            "Query": query,
-            "Count": 5,
-        }
-        api_key = os.getenv("BYTEPLUS_WEB_SEARCH_API_KEY")
-        if not api_key:
-            logger.error("BYTEPLUS_WEB_SEARCH_API_KEY is not set.")
-            return ["Web search failed: API key is not set."]
-        header = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-
-        response = requests.post(
-            url="https://torchlight.byteintlapi.com/search_api/web_search",
-            headers=header,
-            json=request_body,
-            timeout=60,
+    logger.info(f"Start to search {queries} in parallel.")
+    results_list = await asyncio.gather(
+        *(
+            asyncio.to_thread(do_search, query, ak, sk, session_token)
+            for query in queries
         )
-        response.raise_for_status()
-        response = response.json()
-    else:
-        response = ve_request(
-            request_body={
-                "Query": query,
-                "SearchType": "web",
-                "Count": 5,
-                "NeedSummary": True,
-            },
-            action="WebSearch",
-            ak=ak,
-            sk=sk,
-            service="volc_torchlight_api",
-            version="2025-01-01",
-            region="cn-beijing",
-            host="mercury.volcengineapi.com",
-            header={"X-Security-Token": session_token},
-        )
+    )
+    logger.info(f"Finish to search {queries} in parallel.")
 
-    try:
-        results: list = response["Result"]["WebResults"]
-        final_results = []
-        for result in results:
-            final_results.append(result["Summary"].strip())
-        return final_results
-    except Exception as e:
-        logger.error(f"Web search failed {e}, response body: {response}")
-        return [response]
+    results = dict(zip(queries, results_list))
+    logger.debug(f"Search results: {results}")
+    return results

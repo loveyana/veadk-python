@@ -48,9 +48,11 @@ class VikingDBLTMBackend(BaseLongTermMemoryBackend):
 
     session_token: str = ""
 
-    region: str = Field(
-        default_factory=lambda: os.getenv("DATABASE_VIKINGMEM_REGION") or "cn-beijing"
+    cloud_provider: str = Field(
+        default_factory=lambda: os.getenv("CLOUD_PROVIDER", "volces")
     )
+
+    region: str = Field(default="")
     """VikingDB memory region"""
 
     volcengine_project: str = Field(
@@ -61,6 +63,12 @@ class VikingDBLTMBackend(BaseLongTermMemoryBackend):
     memory_type: list[str] = Field(default_factory=list)
 
     def model_post_init(self, __context: Any) -> None:
+        if not self.region:
+            if self.cloud_provider.lower() == "byteplus":
+                self.region = os.getenv("DATABASE_VIKING_REGION", "cn-hongkong")
+            else:
+                self.region = os.getenv("DATABASE_VIKING_REGION", "cn-beijing")
+
         # We get memory type from:
         # 1. user input
         # 2. environment variable
@@ -72,7 +80,7 @@ class VikingDBLTMBackend(BaseLongTermMemoryBackend):
                 self.memory_type = [x.strip() for x in env_memory_type.split(",")]
             else:
                 # self.memory_type = ["sys_event_v1", "event_v1"]
-                self.memory_type = ["sys_event_v1"]
+                self.memory_type = ["sys_event_v1", "sys_profile_v1"]
 
         logger.info(f"Using memory type: {self.memory_type}")
 
@@ -142,7 +150,15 @@ class VikingDBLTMBackend(BaseLongTermMemoryBackend):
 
     def _get_client(self) -> VikingDBMemoryClient:
         ak, sk, sts_token = self._get_ak_sk_sts()
+        if self.cloud_provider.lower() == "byteplus":
+            host = f"api-knowledgebase.mlp.{self.region}.bytepluses.com"
+        else:
+            host = f"api-knowledgebase.mlp.{self.region}.volces.com"
+        logger.info(f"Cloud provider: {self.cloud_provider.lower()}")
+        logger.info(f"VikingDBLTMBackend: region={self.region}, host={host}")
+
         return VikingDBMemoryClient(
+            host=host,
             ak=ak,
             sk=sk,
             sts_token=sts_token,
@@ -151,12 +167,21 @@ class VikingDBLTMBackend(BaseLongTermMemoryBackend):
 
     def _get_sdk_client(self) -> VikingMem:
         ak, sk, sts_token = self._get_ak_sk_sts()
+        if self.cloud_provider.lower() == "byteplus":
+            host = f"api-knowledgebase.mlp.{self.region}.bytepluses.com"
+        else:
+            host = f"api-knowledgebase.mlp.{self.region}.volces.com"
+        logger.info(f"Cloud provider: {self.cloud_provider.lower()}")
+        logger.info(f"VikingDBLTMBackend: region={self.region}, host={host}")
+
         client = VikingDBMemoryClient(
+            host=host,
+            region=self.region,
             ak=ak,
             sk=sk,
             sts_token=sts_token,
-            region=self.region,
         )
+
         return VikingMem(
             host=client.get_host(),
             region=self.region,
@@ -236,19 +261,20 @@ class VikingDBLTMBackend(BaseLongTermMemoryBackend):
         if not response.get("code") == 0:
             raise ValueError(f"Search VikingDB memory error: {response}")
 
+        logger.debug(f"Original response from Viking Memory: {response}")
+
         result = response.get("data", {}).get("result_list", [])
-        if result:
-            return [
+
+        return (
+            [
                 json.dumps(
-                    {
-                        "role": "user",
-                        "parts": [{"text": r.get("memory_info").get("summary")}],
-                    },
+                    {"role": "user", "parts": [{"text": str(result)}]},
                     ensure_ascii=False,
                 )
-                for r in result
             ]
-        return []
+            if result
+            else []
+        )
 
     def get_user_profile(self, user_id: str) -> str:
         from veadk.utils.volcengine_sign import ve_request

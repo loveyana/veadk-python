@@ -11,18 +11,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-from pydantic import BaseModel
-from typing import Optional, List, Dict
-
-
-class Skill(BaseModel):
-    name: str
-    description: str
-    path: str  # local path or tos path
-    skill_space_id: Optional[str] = None
-    bucket_name: Optional[str] = None
-    checklist: List[Dict[str, str]] = []
-
-    def get_checklist_items(self) -> List[str]:
-        return [item.get("item", item.get("id", "")) for item in self.checklist]

@@ -17,9 +17,8 @@ The document of this tool see: https://www.volcengine.com/docs/85508/1650263
 """
 
 import os
-import requests
 
-from google.adk.tools import ToolContext
+from langchain.tools import tool
 
 from veadk.auth.veauth.utils import get_credential_from_vefaas_iam
 from veadk.utils.logger import get_logger
@@ -28,7 +27,8 @@ from veadk.utils.volcengine_sign import ve_request
 logger = get_logger(__name__)
 
 
-def web_search(query: str, tool_context: ToolContext | None = None) -> list[str]:
+@tool
+def web_search(query: str) -> list[str]:
     """Search a query in websites.
 
     Args:
@@ -37,16 +37,13 @@ def web_search(query: str, tool_context: ToolContext | None = None) -> list[str]
     Returns:
         A list of result documents.
     """
-    ak = None
-    sk = None
+
     # First try to get tool-specific AK/SK
     ak = os.getenv("TOOL_WEB_SEARCH_ACCESS_KEY")
     sk = os.getenv("TOOL_WEB_SEARCH_SECRET_KEY")
     if ak and sk:
         logger.debug("Successfully get tool-specific AK/SK.")
-    elif tool_context:
-        ak = tool_context.state.get("VOLCENGINE_ACCESS_KEY")
-        sk = tool_context.state.get("VOLCENGINE_SECRET_KEY")
+
     session_token = ""
 
     if not (ak and sk):
@@ -64,48 +61,22 @@ def web_search(query: str, tool_context: ToolContext | None = None) -> list[str]
     else:
         logger.debug("Successfully get AK/SK from tool context.")
 
-    provider = (os.getenv("CLOUD_PROVIDER") or "").lower()
-    logger.info(f"Cloud provider: {provider}")
-
-    if provider == "byteplus":
-        request_body = {
+    response = ve_request(
+        request_body={
             "Query": query,
+            "SearchType": "web",
             "Count": 5,
-        }
-        api_key = os.getenv("BYTEPLUS_WEB_SEARCH_API_KEY")
-        if not api_key:
-            logger.error("BYTEPLUS_WEB_SEARCH_API_KEY is not set.")
-            return ["Web search failed: API key is not set."]
-        header = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-
-        response = requests.post(
-            url="https://torchlight.byteintlapi.com/search_api/web_search",
-            headers=header,
-            json=request_body,
-            timeout=60,
-        )
-        response.raise_for_status()
-        response = response.json()
-    else:
-        response = ve_request(
-            request_body={
-                "Query": query,
-                "SearchType": "web",
-                "Count": 5,
-                "NeedSummary": True,
-            },
-            action="WebSearch",
-            ak=ak,
-            sk=sk,
-            service="volc_torchlight_api",
-            version="2025-01-01",
-            region="cn-beijing",
-            host="mercury.volcengineapi.com",
-            header={"X-Security-Token": session_token},
-        )
+            "NeedSummary": True,
+        },
+        action="WebSearch",
+        ak=ak,
+        sk=sk,
+        service="volc_torchlight_api",
+        version="2025-01-01",
+        region="cn-beijing",
+        host="mercury.volcengineapi.com",
+        header={"X-Security-Token": session_token},
+    )
 
     try:
         results: list = response["Result"]["WebResults"]

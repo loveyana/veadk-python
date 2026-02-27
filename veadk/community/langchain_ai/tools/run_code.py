@@ -15,7 +15,7 @@
 import json
 import os
 
-from google.adk.tools import ToolContext
+from langchain.tools import ToolRuntime, tool
 
 from veadk.auth.veauth.utils import get_credential_from_vefaas_iam
 from veadk.config import getenv
@@ -25,9 +25,8 @@ from veadk.utils.volcengine_sign import ve_request
 logger = get_logger(__name__)
 
 
-def run_code(
-    code: str, language: str, tool_context: ToolContext, timeout: int = 30
-) -> str:
+@tool
+def run_code(code: str, language: str, runtime: ToolRuntime, timeout: int = 30) -> str:
     """Run code in a code sandbox and return the output.
     For C++ code, don't execute it directly, compile and execute via Python; write sources and object files to /tmp.
 
@@ -45,27 +44,19 @@ def run_code(
     service = getenv(
         "AGENTKIT_TOOL_SERVICE_CODE", "agentkit"
     )  # temporary service for code run tool
-
-    cloud_provider = (os.getenv("CLOUD_PROVIDER") or "").lower()
-    if cloud_provider == "byteplus":
-        sld = "bytepluses"
-        default_region = "ap-southeast-1"
-    else:
-        sld = "volces"
-        default_region = "cn-beijing"
-
-    region = getenv("AGENTKIT_TOOL_REGION", default_region)
+    region = getenv("AGENTKIT_TOOL_REGION", "cn-beijing")
     host = getenv(
-        "AGENTKIT_TOOL_HOST", service + "." + region + f".{sld}.com"
+        "AGENTKIT_TOOL_HOST", service + "." + region + ".volces.com"
     )  # temporary host for code run tool
-    scheme = getenv("AGENTKIT_TOOL_SCHEME", "https", allow_false_values=True).lower()
+    scheme = os.getenv("AGENTKIT_TOOL_SCHEME", "https").lower()
     if scheme not in {"http", "https"}:
         scheme = "https"
     logger.debug(f"tools endpoint: {host}")
 
-    session_id = tool_context._invocation_context.session.id
-    agent_name = tool_context._invocation_context.agent.name
-    user_id = tool_context._invocation_context.user_id
+    session_id = runtime.context.session_id  # type: ignore
+    user_id = runtime.context.user_id  # type: ignore
+    agent_name = runtime.context.agent_name  # type: ignore
+
     tool_user_session_id = agent_name + "_" + user_id + "_" + session_id
     logger.debug(f"tool_user_session_id: {tool_user_session_id}")
 
@@ -73,26 +64,21 @@ def run_code(
         f"Running code in language: {language}, session_id={session_id}, code={code}, tool_id={tool_id}, host={host}, service={service}, region={region}, timeout={timeout}"
     )
 
-    ak = tool_context.state.get("VOLCENGINE_ACCESS_KEY")
-    sk = tool_context.state.get("VOLCENGINE_SECRET_KEY")
     header = {}
 
+    logger.debug("Get AK/SK from tool context failed.")
+    ak = os.getenv("VOLCENGINE_ACCESS_KEY")
+    sk = os.getenv("VOLCENGINE_SECRET_KEY")
     if not (ak and sk):
-        logger.debug("Get AK/SK from tool context failed.")
-        ak = os.getenv("VOLCENGINE_ACCESS_KEY")
-        sk = os.getenv("VOLCENGINE_SECRET_KEY")
-        if not (ak and sk):
-            logger.debug(
-                "Get AK/SK from environment variables failed. Try to use credential from Iam."
-            )
-            credential = get_credential_from_vefaas_iam()
-            ak = credential.access_key_id
-            sk = credential.secret_access_key
-            header = {"X-Security-Token": credential.session_token}
-        else:
-            logger.debug("Successfully get AK/SK from environment variables.")
+        logger.debug(
+            "Get AK/SK from environment variables failed. Try to use credential from Iam."
+        )
+        credential = get_credential_from_vefaas_iam()
+        ak = credential.access_key_id
+        sk = credential.secret_access_key
+        header = {"X-Security-Token": credential.session_token}
     else:
-        logger.debug("Successfully get AK/SK from tool context.")
+        logger.debug("Successfully get AK/SK from environment variables.")
 
     res = ve_request(
         request_body={
@@ -106,7 +92,6 @@ def run_code(
                     "kernel_name": language,
                 }
             ),
-            "Ttl": os.getenv("AGENTKIT_TOOL_TTL", 1800),
         },
         action="InvokeTool",
         ak=ak,
@@ -116,7 +101,7 @@ def run_code(
         region=region,
         host=host,
         header=header,
-        scheme=scheme,
+        scheme=scheme,  # type: ignore
     )
     logger.debug(f"Invoke run code response: {res}")
 
